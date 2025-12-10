@@ -35,7 +35,7 @@ struct Arguments {
     std::string output_file = "results.txt";
     std::string ssd_failure_trace = "";  // Path to SSD failure trace file
     bool qlc_cache = false;
-    int nprocs = 20;
+    int nprocs = 40;
     double box_mttf = 0.0;
     double io_module_mttr = 0.0;
     double rebuild_bw_ratio = 0.2;
