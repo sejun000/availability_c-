@@ -50,7 +50,9 @@ void calculate_hardware_graph(
     const std::map<std::string, std::vector<std::string>>& enclosure_to_node_map,
     const nlohmann::json& options,
     std::map<NodeFailureKey, GraphStructure>& failed_hardware_graph_table,
-    std::map<NodeFailureKey, DisconnectedStatus>& disconnected_table) {
+    std::map<NodeFailureKey, DisconnectedStatus>& disconnected_table,
+    const SSDIOModuleManager* ssd_io_manager,
+    int total_ssds) {
 
     if (failed_hardware_graph_table.find(key) != failed_hardware_graph_table.end()) {
         return;
@@ -85,6 +87,14 @@ void calculate_hardware_graph(
     DisconnectedStatus disconnected;
     disconnected.local_module = !connected;
     disconnected.common_module = false;
+
+    // Calculate per-SSD disconnected status based on io_module failures
+    if (ssd_io_manager != nullptr && total_ssds > 0) {
+        for (int ssd_idx = 0; ssd_idx < total_ssds; ++ssd_idx) {
+            disconnected.ssd_disconnected[ssd_idx] =
+                ssd_io_manager->is_ssd_disconnected(ssd_idx, failed_nodes_and_enclosures);
+        }
+    }
 
     disconnected_table[key] = disconnected;
     failed_hardware_graph_table[key] = hardware_graph_copy;

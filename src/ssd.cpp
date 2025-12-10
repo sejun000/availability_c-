@@ -1,5 +1,90 @@
 #include "ssd.hpp"
 
+// SSDIOModuleManager implementation
+void SSDIOModuleManager::initialize(const std::vector<SSDIOModuleMapping>& mappings,
+                                     int total_ssds,
+                                     const std::set<std::string>& all_io_modules) {
+    total_ssds_ = total_ssds;
+    all_io_modules_ = all_io_modules;
+
+    if (mappings.empty()) {
+        // Legacy mode: all SSDs connect to all io_modules
+        legacy_mode_ = true;
+        mappings_.clear();
+        return;
+    }
+
+    legacy_mode_ = false;
+    mappings_.clear();
+
+    // Compute start_ssd_index for each mapping
+    int current_index = 0;
+    for (const auto& m : mappings) {
+        SSDIOModuleMapping entry;
+        entry.ssd_count = m.ssd_count;
+        entry.io_modules = m.io_modules;
+        entry.start_ssd_index = current_index;
+        mappings_.push_back(entry);
+        current_index += m.ssd_count;
+    }
+}
+
+bool SSDIOModuleManager::is_ssd_disconnected(int ssd_index,
+                                              const std::map<std::string, bool>& failed_nodes) const {
+    if (legacy_mode_) {
+        // Legacy: all io_modules must be failed for SSD to be disconnected
+        for (const auto& io_module : all_io_modules_) {
+            auto it = failed_nodes.find(io_module);
+            if (it == failed_nodes.end() || !it->second) {
+                // At least one io_module is up
+                return false;
+            }
+        }
+        return true;  // All io_modules failed
+    }
+
+    // Find which mapping this SSD belongs to
+    for (const auto& mapping : mappings_) {
+        int end_index = mapping.start_ssd_index + mapping.ssd_count;
+        if (ssd_index >= mapping.start_ssd_index && ssd_index < end_index) {
+            // Check if ALL io_modules for this SSD are failed
+            for (const auto& io_module : mapping.io_modules) {
+                auto it = failed_nodes.find(io_module);
+                if (it == failed_nodes.end() || !it->second) {
+                    // At least one io_module is up
+                    return false;
+                }
+            }
+            return true;  // All connected io_modules failed
+        }
+    }
+
+    // SSD not found in any mapping - assume connected to all (fallback)
+    for (const auto& io_module : all_io_modules_) {
+        auto it = failed_nodes.find(io_module);
+        if (it == failed_nodes.end() || !it->second) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::vector<std::string> SSDIOModuleManager::get_io_modules_for_ssd(int ssd_index) const {
+    if (legacy_mode_) {
+        return std::vector<std::string>(all_io_modules_.begin(), all_io_modules_.end());
+    }
+
+    for (const auto& mapping : mappings_) {
+        int end_index = mapping.start_ssd_index + mapping.ssd_count;
+        if (ssd_index >= mapping.start_ssd_index && ssd_index < end_index) {
+            return mapping.io_modules;
+        }
+    }
+
+    // Fallback: return all io_modules
+    return std::vector<std::string>(all_io_modules_.begin(), all_io_modules_.end());
+}
+
 std::string get_ssd_name(int ssd_index) {
     return SSD_MODULE_NAME + std::to_string(ssd_index);
 }

@@ -194,7 +194,8 @@ void push_repair_event(std::priority_queue<Event, std::vector<Event>, std::great
                        double current_time,
                        const std::map<std::string, std::string>& node_to_module_map,
                        const GraphStructure& hardware_graph,
-                       bool software_repair_only) {
+                       bool software_repair_only,
+                       const nlohmann::json* options) {
     if (is_event_node_ssd(event_node)) {
         Event event{current_time + BIG_NUMBER, "repair", event_node, current_time, current_time, software_repair_only};
         repair_events.push(event);
@@ -204,8 +205,29 @@ void push_repair_event(std::priority_queue<Event, std::vector<Event>, std::great
         std::string module = it->second;
         auto mtr_it = hardware_graph.mtrs_.find(module);
         if (mtr_it == hardware_graph.mtrs_.end()) return;
-        double repair_time = current_time + mtr_it->second;
-        Event event{repair_time, "repair", event_node, current_time, current_time, software_repair_only};
+
+        double mtr = mtr_it->second;
+        bool is_hardware_fault = false;
+
+        // Check if this is io_module and apply software/hardware fault distinction
+        if (module.find("io_module") != std::string::npos && options != nullptr) {
+            double software_fault_ratio = options->value("io_module_software_fault_ratio", 1.0);
+            double hardware_mtr = options->value("io_module_hardware_mtr", mtr);
+
+            // Determine if this is a hardware fault (permanent) or software fault (transient)
+            std::uniform_real_distribution<double> uniform(0.0, 1.0);
+            double rand_val = uniform(rng);
+
+            if (rand_val >= software_fault_ratio) {
+                // Hardware fault: use longer repair time
+                mtr = hardware_mtr;
+                is_hardware_fault = true;
+            }
+            // else: Software fault: use default (shorter) repair time
+        }
+
+        double repair_time = current_time + mtr;
+        Event event{repair_time, "repair", event_node, current_time, current_time, software_repair_only || !is_hardware_fault};
         repair_events.push(event);
     }
 }
@@ -339,13 +361,20 @@ void calculate_flows_and_speed(
         int ssd_m = ssd_redun_scheme.get_m(cached);
         int ssd_k = ssd_redun_scheme.get_k(cached);
         int ssd_l = ssd_redun_scheme.get_l(cached);
+        int group_size = ssd_m + ssd_k + ssd_l;
 
         double ssd_read_bw = ssd_redun_scheme.get_read_bw(cached);
         if (end_module_degraded || (!options["active_active"] && !options["single_port_ssd"])) {
             ssd_read_bw /= 2.0;
         }
 
-        int degraded_ssd_count = ssd_m + ssd_k + ssd_l - failure_info.failure_count;
+        // Include disconnected SSDs (due to io_module failure) in effective failure count
+        int start_ssd_idx = ssd_redun_scheme.get_start_ssd_index(group_index);
+        int disconnected_count = disconnected.get_disconnected_count_in_group(start_ssd_idx, group_size);
+        int effective_failure_count = failure_info.failure_count + disconnected_count;
+
+        int degraded_ssd_count = group_size - effective_failure_count;
+        if (degraded_ssd_count < 0) degraded_ssd_count = 0;
         total_read_bw_for_ssds += ssd_read_bw * degraded_ssd_count;
         normal_ssds_count += degraded_ssd_count;
     }
@@ -390,20 +419,31 @@ void calculate_flows_and_speed(
         int ssd_m = ssd_redun_scheme.get_m(cached);
         int ssd_k = ssd_redun_scheme.get_k(cached);
         int ssd_l = ssd_redun_scheme.get_l(cached);
+        int group_size = ssd_m + ssd_k + ssd_l;
         int inter_replicas = ssd_redun_scheme.get_inter_replicas(cached);
         int intra_replicas = ssd_redun_scheme.get_intra_replicas(cached);
         bool inter_replication = (inter_replicas > 0);
         bool intra_replication = (intra_replicas > 0);
 
-        std::string state = judge_state_from_failure_info(failure_info, ssd_redun_scheme, disconnected, cached);
+        // Calculate effective failure count including disconnected SSDs
+        int start_ssd_idx = ssd_redun_scheme.get_start_ssd_index(group_index);
+        int disconnected_count = disconnected.get_disconnected_count_in_group(start_ssd_idx, group_size);
+        int effective_failure_count = failure_info.failure_count + disconnected_count;
+
+        // Create effective failure info for state judgment
+        FailureInfo effective_failure_info = failure_info;
+        effective_failure_info.failure_count = effective_failure_count;
+
+        std::string state = judge_state_from_failure_info(effective_failure_info, ssd_redun_scheme, disconnected, cached);
 
         // Intra rebuilding
         if (state == SSD_STATE_INTRA_REBUILDING) {
-            int local_failure_count = failure_info.failure_count;
-            int degraded_ssds = ssd_m + ssd_k + ssd_l - local_failure_count;
+            int local_failure_count = effective_failure_count;
+            int degraded_ssds = group_size - local_failure_count;
+            if (degraded_ssds < 0) degraded_ssds = 0;
             int rebuild_speed_up = 1;
-            if (ssd_l > 0 && failure_info.failure_count <= ssd_l) {
-                rebuild_speed_up = degraded_ssds;
+            if (ssd_l > 0 && effective_failure_count <= ssd_l) {
+                rebuild_speed_up = degraded_ssds > 0 ? degraded_ssds : 1;
             }
 
             double degraded_bw = calculate_bottleneck_speed(ssd_m, local_failure_count,
@@ -449,11 +489,12 @@ void calculate_flows_and_speed(
                 entry.backup_rebuild_speed = rebuilding_bw;
             }
 
-            double data_loss_portion = pfail(ssd_m, ssd_k, ssd_l, failure_info.failure_count);
-            int degraded_ssd_count = ssd_m + ssd_k + ssd_l - failure_info.failure_count;
+            double data_loss_portion = pfail(ssd_m, ssd_k, ssd_l, effective_failure_count);
+            int degraded_ssd_count = group_size - effective_failure_count;
+            if (degraded_ssd_count < 0) degraded_ssd_count = 0;
             total_read_bw_for_ssds -= local_ssd_read_bw * degraded_ssd_count;
 
-            double avail_reduction = (ssd_m + ssd_k + ssd_l) / static_cast<double>(tiered_ssds) * data_loss_portion;
+            double avail_reduction = group_size / static_cast<double>(tiered_ssds) * data_loss_portion;
             if (prefix == "cached_") {
                 entry.availability_ratio.cached_availability -= avail_reduction;
             } else {
@@ -461,7 +502,7 @@ void calculate_flows_and_speed(
             }
         }
 
-        // Check data loss ignoring disconnection
+        // Check data loss ignoring disconnection (use original failure_info)
         if (judge_state_from_failure_info(failure_info, ssd_redun_scheme, disconnected, cached, true) == SSD_STATE_DATA_LOSS) {
             if (index == 0) {
                 entry.up_first_group = 0;
@@ -469,11 +510,12 @@ void calculate_flows_and_speed(
         }
 
         // Check other nodes catastrophic failure
-        if (is_other_nodes_catastrophic_failure_and_recoverable(failure_info, ssd_k, network_k, disconnected)) {
+        if (is_other_nodes_catastrophic_failure_and_recoverable(effective_failure_info, ssd_k, network_k, disconnected)) {
             double degraded_bw = calculate_bottleneck_speed(network_m, failure_info.network_failure_count,
                                                            {bottleneck_read_bw_per_ssd, ssd_write_bw},
                                                            options, inter_replication);
-            int degraded_ssd_count = ssd_m + ssd_k + ssd_l - failure_info.failure_count;
+            int degraded_ssd_count = group_size - effective_failure_count;
+            if (degraded_ssd_count < 0) degraded_ssd_count = 0;
             if (inter_replicas > 0) {
                 degraded_bw /= inter_replicas;
             }

@@ -240,6 +240,7 @@ void process_simulation_event(
     double max_read_performance_without_any_failure,
     const nlohmann::json& options,
     const std::map<std::string, double>& costs,
+    const SSDIOModuleManager* ssd_io_manager,
     const EmpiricalCDF* ssd_failure_cdf = nullptr,
     double ssd_arr = 0.0) {
 
@@ -267,7 +268,7 @@ void process_simulation_event(
 
     calculate_hardware_graph(hardware_graph, state.failed_nodes_and_enclosures, node_key,
                              enclosure_to_node_map, options, state.failed_hardware_graph_table,
-                             state.disconnected_table);
+                             state.disconnected_table, ssd_io_manager, params.total_ssds);
     DisconnectedStatus disconnected = state.disconnected_table[node_key];
 
     FailureStateKey flow_key = build_failure_state_key(
@@ -298,7 +299,7 @@ void process_simulation_event(
             state.last_timestamp_for_rebuilding_ssd0 = event_time;
         }
         push_repair_event(state.repair_events, event_node, event_time, node_to_module_map,
-                         hardware_graph, software_repair_only);
+                         hardware_graph, software_repair_only, &options);
     }
 
     // Handle repair events
@@ -394,6 +395,35 @@ SimulationResult simulation_per_core(
         initialize_simulation(hardware_graph, params.read_bw, params.total_ssds, options,
                             params.box_mttf, params.io_module_mttr);
 
+    // Initialize SSD-IO Module manager
+    SSDIOModuleManager ssd_io_manager;
+    std::vector<SSDIOModuleMapping> ssd_io_mappings;
+
+    // Parse ssd_io_modules from options if present
+    if (options.contains("ssd_io_modules") && options["ssd_io_modules"].is_array()) {
+        for (const auto& entry : options["ssd_io_modules"]) {
+            SSDIOModuleMapping mapping;
+            mapping.ssd_count = entry.value("ssds", 0);
+            mapping.io_modules = entry.value("io_modules", std::vector<std::string>{});
+            mapping.start_ssd_index = 0;  // Will be computed by initialize()
+            ssd_io_mappings.push_back(mapping);
+        }
+        if (simulation_idx == 0 && !ssd_io_mappings.empty()) {
+            Logger::getInstance().info("Using SSD-IO module mapping from config (" +
+                                       std::to_string(ssd_io_mappings.size()) + " mapping groups)");
+        }
+    }
+
+    // Collect all io_modules from hardware graph
+    std::set<std::string> all_io_modules;
+    for (const auto& node : hardware_graph.get_nodes()) {
+        if (node.find("io_module") != std::string::npos) {
+            all_io_modules.insert(node);
+        }
+    }
+
+    ssd_io_manager.initialize(ssd_io_mappings, params.total_ssds, all_io_modules);
+
     // Initialize state
     SimulationState state = initialize_simulation_state(params, hardware_graph, ssd_redun_scheme,
                                                         node_to_module_map, costs, options, ssd_failure_cdf_ptr, ssd_arr);
@@ -413,7 +443,7 @@ SimulationResult simulation_per_core(
         state.failed_nodes_and_enclosures, state.node_index_map, state.node_count);
     calculate_hardware_graph(hardware_graph, state.failed_nodes_and_enclosures, initial_node_key,
                              enclosure_to_node_map, options, state.failed_hardware_graph_table,
-                             state.disconnected_table);
+                             state.disconnected_table, &ssd_io_manager, params.total_ssds);
 
     FailureStateKey flow_key = build_failure_state_key(
         state.failed_nodes_and_enclosures, state.failure_info_per_ssd_group,
@@ -479,7 +509,8 @@ SimulationResult simulation_per_core(
         // Process event
         process_simulation_event(event, state, params, ssd_redun_scheme, hardware_graph,
                                 node_to_module_map, enclosure_to_node_map, network_availability_table,
-                                max_read_performance_without_any_failure, options, costs, ssd_failure_cdf_ptr, ssd_arr);
+                                max_read_performance_without_any_failure, options, costs,
+                                &ssd_io_manager, ssd_failure_cdf_ptr, ssd_arr);
 
         state.prev_time = event_time;
 
@@ -488,7 +519,7 @@ SimulationResult simulation_per_core(
             state.failed_nodes_and_enclosures, state.node_index_map, state.node_count);
         calculate_hardware_graph(hardware_graph, state.failed_nodes_and_enclosures, node_key,
                                  enclosure_to_node_map, options, state.failed_hardware_graph_table,
-                                 state.disconnected_table);
+                                 state.disconnected_table, &ssd_io_manager, params.total_ssds);
 
         flow_key = build_failure_state_key(
             state.failed_nodes_and_enclosures, state.failure_info_per_ssd_group,

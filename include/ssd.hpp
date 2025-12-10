@@ -1,8 +1,50 @@
 #pragma once
 
 #include <string>
+#include <vector>
+#include <map>
+#include <set>
 
 const std::string SSD_MODULE_NAME = "SSD";
+
+// SSD to IO Module mapping entry
+struct SSDIOModuleMapping {
+    int ssd_count;                          // Number of SSDs in this group
+    std::vector<std::string> io_modules;    // IO modules these SSDs are connected to
+    int start_ssd_index;                    // Starting SSD index (computed)
+};
+
+// Manages SSD to IO Module connectivity
+class SSDIOModuleManager {
+public:
+    SSDIOModuleManager() = default;
+
+    // Initialize from JSON config (ssd_io_modules array)
+    // If empty, all SSDs connect to all io_modules (legacy behavior)
+    void initialize(const std::vector<SSDIOModuleMapping>& mappings,
+                    int total_ssds,
+                    const std::set<std::string>& all_io_modules);
+
+    // Check if SSD is disconnected given failed io_modules
+    // Returns true if ALL io_modules for this SSD have failed
+    bool is_ssd_disconnected(int ssd_index,
+                             const std::map<std::string, bool>& failed_nodes) const;
+
+    // Get list of io_modules that this SSD is connected to
+    std::vector<std::string> get_io_modules_for_ssd(int ssd_index) const;
+
+    // Check if legacy mode (all SSDs connect to all io_modules)
+    bool is_legacy_mode() const { return legacy_mode_; }
+
+    // Get all io_modules in the system
+    const std::set<std::string>& get_all_io_modules() const { return all_io_modules_; }
+
+private:
+    std::vector<SSDIOModuleMapping> mappings_;
+    std::set<std::string> all_io_modules_;
+    int total_ssds_ = 0;
+    bool legacy_mode_ = true;  // If true, all SSDs connect to all io_modules
+};
 
 // SSD naming and indexing utilities
 std::string get_ssd_name(int ssd_index);

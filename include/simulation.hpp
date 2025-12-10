@@ -61,8 +61,27 @@ struct FailureInfo {
 struct DisconnectedStatus {
     bool local_module;
     bool common_module;
+    std::map<int, bool> ssd_disconnected;  // SSD index -> disconnected due to io_module failure
 
     DisconnectedStatus() : local_module(false), common_module(false) {}
+
+    // Get count of disconnected SSDs in a group
+    int get_disconnected_count_in_group(int start_ssd_index, int group_size) const {
+        int count = 0;
+        for (int i = start_ssd_index; i < start_ssd_index + group_size; ++i) {
+            auto it = ssd_disconnected.find(i);
+            if (it != ssd_disconnected.end() && it->second) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    // Check if specific SSD is disconnected
+    bool is_ssd_disconnected(int ssd_index) const {
+        auto it = ssd_disconnected.find(ssd_index);
+        return it != ssd_disconnected.end() && it->second;
+    }
 };
 
 // Availability ratio
@@ -222,7 +241,8 @@ void push_repair_event(
     double current_time,
     const std::map<std::string, std::string>& node_to_module_map,
     const GraphStructure& hardware_graph,
-    bool software_repair_only = false);
+    bool software_repair_only = false,
+    const nlohmann::json* options = nullptr);
 
 Event pop_event(
     std::priority_queue<Event, std::vector<Event>, std::greater<Event>>& events,

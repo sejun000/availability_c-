@@ -32,7 +32,9 @@ void calculate_hardware_graph(
     const std::map<std::string, std::vector<std::string>>& enclosure_to_node_map,
     const nlohmann::json& options,
     std::map<NodeFailureKey, GraphStructure>& failed_hardware_graph_table,
-    std::map<NodeFailureKey, DisconnectedStatus>& disconnected_table);
+    std::map<NodeFailureKey, DisconnectedStatus>& disconnected_table,
+    const SSDIOModuleManager* ssd_io_manager = nullptr,
+    int total_ssds = 0);
 
 // Initialize simulation
 std::tuple<std::map<std::string, std::string>,
