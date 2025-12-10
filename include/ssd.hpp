@@ -33,6 +33,13 @@ public:
     // Get list of io_modules that this SSD is connected to
     std::vector<std::string> get_io_modules_for_ssd(int ssd_index) const;
 
+    // Check if EC group crosses io_module boundary
+    // Returns true if SSDs in the group are connected to different io_modules
+    bool does_ec_group_cross_io_module(int start_ssd_index, int group_size) const;
+
+    // Get set of io_modules used by an EC group
+    std::set<std::string> get_io_modules_for_ec_group(int start_ssd_index, int group_size) const;
+
     // Check if legacy mode (all SSDs connect to all io_modules)
     bool is_legacy_mode() const { return legacy_mode_; }
 

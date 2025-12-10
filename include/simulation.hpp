@@ -272,7 +272,8 @@ void calculate_flows_and_speed(
     std::map<FailureStateKey, FlowsAndSpeedEntry>& flows_and_speed_table,
     double max_read_performance_without_any_failure,
     const DisconnectedStatus& disconnected,
-    const FailureStateKey& key);
+    const FailureStateKey& key,
+    const SSDIOModuleManager* ssd_io_manager = nullptr);
 
 // SSD state update functions
 void update_all_ssd_states(

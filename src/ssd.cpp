@@ -85,6 +85,43 @@ std::vector<std::string> SSDIOModuleManager::get_io_modules_for_ssd(int ssd_inde
     return std::vector<std::string>(all_io_modules_.begin(), all_io_modules_.end());
 }
 
+std::set<std::string> SSDIOModuleManager::get_io_modules_for_ec_group(int start_ssd_index, int group_size) const {
+    std::set<std::string> io_modules;
+
+    for (int i = start_ssd_index; i < start_ssd_index + group_size; ++i) {
+        auto ssd_io_modules = get_io_modules_for_ssd(i);
+        for (const auto& io_module : ssd_io_modules) {
+            io_modules.insert(io_module);
+        }
+    }
+
+    return io_modules;
+}
+
+bool SSDIOModuleManager::does_ec_group_cross_io_module(int start_ssd_index, int group_size) const {
+    if (legacy_mode_) {
+        // In legacy mode, all SSDs connect to all io_modules, so no crossing
+        return false;
+    }
+
+    // Get io_modules for first SSD in the group
+    auto first_io_modules = get_io_modules_for_ssd(start_ssd_index);
+    std::set<std::string> first_set(first_io_modules.begin(), first_io_modules.end());
+
+    // Check if all SSDs in the group have the same io_modules
+    for (int i = start_ssd_index + 1; i < start_ssd_index + group_size; ++i) {
+        auto ssd_io_modules = get_io_modules_for_ssd(i);
+        std::set<std::string> current_set(ssd_io_modules.begin(), ssd_io_modules.end());
+
+        if (first_set != current_set) {
+            // SSDs have different io_module connections -> crosses boundary
+            return true;
+        }
+    }
+
+    return false;
+}
+
 std::string get_ssd_name(int ssd_index) {
     return SSD_MODULE_NAME + std::to_string(ssd_index);
 }

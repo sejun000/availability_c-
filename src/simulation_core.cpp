@@ -277,7 +277,7 @@ void process_simulation_event(
 
     calculate_flows_and_speed(state.failed_hardware_graph_table[node_key], state.failure_info_per_ssd_group,
                               ssd_redun_scheme, options, state.flows_and_speed_table,
-                              max_read_performance_without_any_failure, disconnected, flow_key);
+                              max_read_performance_without_any_failure, disconnected, flow_key, ssd_io_manager);
     const FlowsAndSpeedEntry& flow_entry = state.flows_and_speed_table[flow_key];
 
     // Update SSD state
@@ -451,7 +451,7 @@ SimulationResult simulation_per_core(
 
     calculate_flows_and_speed(state.failed_hardware_graph_table[initial_node_key], state.failure_info_per_ssd_group,
                               ssd_redun_scheme, options, state.flows_and_speed_table,
-                              max_read_performance_without_any_failure, state.disconnected_table[initial_node_key], flow_key);
+                              max_read_performance_without_any_failure, state.disconnected_table[initial_node_key], flow_key, &ssd_io_manager);
 
     // Simulation parameters
     int simulation_years = options.value("simulation_years", 10);

@@ -6,6 +6,7 @@
 #include "graph_structure.hpp"
 #include "ssd.hpp"
 #include "simulation.hpp"
+#include "logger.hpp"
 
 // Command line argument parser
 struct Arguments {
@@ -28,7 +29,6 @@ struct Arguments {
     int network_l = 0;
     uint64_t capacity = 64000000000000ULL;
     bool qlc = false;
-    bool simulation = false;
     double dwpd = 1.0;
     int guaranteed_years = 5;
     std::string config_file = "2tier.json";
@@ -43,6 +43,7 @@ struct Arguments {
     double target_perf_ratio = 0.8;
     bool single_port_ssd = false;
     bool active_active = false;
+    bool verbose = false;
 };
 
 Arguments parse_arguments(int argc, char* argv[]) {
@@ -66,7 +67,6 @@ Arguments parse_arguments(int argc, char* argv[]) {
         else if (arg == "--cached_write_ratio" && i + 1 < argc) args.cached_write_ratio = std::stod(argv[++i]);
         else if (arg == "--capacity" && i + 1 < argc) args.capacity = std::stoull(argv[++i]);
         else if (arg == "--qlc") args.qlc = true;
-        else if (arg == "--simulation") args.simulation = true;
         else if (arg == "--dwpd" && i + 1 < argc) args.dwpd = std::stod(argv[++i]);
         else if (arg == "--guaranteed_years" && i + 1 < argc) args.guaranteed_years = std::stoi(argv[++i]);
         else if (arg == "--config_file" && i + 1 < argc) args.config_file = argv[++i];
@@ -81,6 +81,43 @@ Arguments parse_arguments(int argc, char* argv[]) {
         else if (arg == "--target_perf_ratio" && i + 1 < argc) args.target_perf_ratio = std::stod(argv[++i]);
         else if (arg == "--single_port_ssd") args.single_port_ssd = true;
         else if (arg == "--active_active") args.active_active = true;
+        else if (arg == "--verbose") args.verbose = true;
+        else {
+            std::cerr << "Error: Unknown argument: " << arg << std::endl;
+            std::cerr << "Valid options:" << std::endl;
+            std::cerr << "  --total_ssds <int>        Total number of SSDs" << std::endl;
+            std::cerr << "  --m <int>                 Data chunks in erasure coding" << std::endl;
+            std::cerr << "  --k <int>                 Parity chunks in erasure coding" << std::endl;
+            std::cerr << "  --l <int>                 Local parity chunks" << std::endl;
+            std::cerr << "  --cached_ssds <int>       Number of cached SSDs" << std::endl;
+            std::cerr << "  --cached_m <int>          Cached data chunks" << std::endl;
+            std::cerr << "  --cached_k <int>          Cached parity chunks" << std::endl;
+            std::cerr << "  --cached_l <int>          Cached local parity chunks" << std::endl;
+            std::cerr << "  --network_m <int>         Network data chunks" << std::endl;
+            std::cerr << "  --network_k <int>         Network parity chunks" << std::endl;
+            std::cerr << "  --network_l <int>         Network local parity chunks" << std::endl;
+            std::cerr << "  --inter_replicas <int>    Inter-node replicas" << std::endl;
+            std::cerr << "  --intra_replicas <int>    Intra-node replicas" << std::endl;
+            std::cerr << "  --cached_write_ratio <double>" << std::endl;
+            std::cerr << "  --capacity <uint64>       Total capacity in bytes" << std::endl;
+            std::cerr << "  --qlc                     Use QLC SSDs" << std::endl;
+            std::cerr << "  --dwpd <double>           Drive writes per day" << std::endl;
+            std::cerr << "  --guaranteed_years <int>  Guaranteed years" << std::endl;
+            std::cerr << "  --config_file <path>      Configuration file path" << std::endl;
+            std::cerr << "  --output_file <path>      Output file path" << std::endl;
+            std::cerr << "  --ssd_failure_trace <path> SSD failure trace file" << std::endl;
+            std::cerr << "  --qlc_cache               Use QLC for cache" << std::endl;
+            std::cerr << "  --nprocs <int>            Number of processes" << std::endl;
+            std::cerr << "  --box_mttf <double>       Box MTTF in hours" << std::endl;
+            std::cerr << "  --io_module_mttr <double> IO module MTTR in hours" << std::endl;
+            std::cerr << "  --rebuild_bw_ratio <double>" << std::endl;
+            std::cerr << "  --no_result               Don't write results" << std::endl;
+            std::cerr << "  --target_perf_ratio <double>" << std::endl;
+            std::cerr << "  --single_port_ssd         Single port SSD mode" << std::endl;
+            std::cerr << "  --active_active           Active-active mode" << std::endl;
+            std::cerr << "  --verbose                 Enable verbose logging" << std::endl;
+            exit(1);
+        }
     }
 
     return args;
@@ -88,6 +125,12 @@ Arguments parse_arguments(int argc, char* argv[]) {
 
 int main(int argc, char* argv[]) {
     Arguments args = parse_arguments(argc, argv);
+
+    // Configure logger: quiet by default, verbose with --verbose flag
+    // ERROR logs are always shown
+    if (!args.verbose) {
+        Logger::getInstance().setLevel(Logger::Level::ERROR);
+    }
 
     // Parse configuration file
     std::vector<std::tuple<std::string, std::string, std::string>> edges;
@@ -155,77 +198,73 @@ int main(int argc, char* argv[]) {
     std::cout << "  Total SSDs: " << args.total_ssds << std::endl;
     std::cout << "  m=" << args.m << ", k=" << args.k << ", l=" << args.l << std::endl;
     std::cout << "  Network: m=" << args.network_m << ", k=" << args.network_k << std::endl;
-    std::cout << "  Simulation: " << (args.simulation ? "enabled" : "disabled") << std::endl;
 
-    if (args.simulation) {
-        // Prepare simulation parameters
-        std::map<std::string, nlohmann::json> params_and_results;
-        params_and_results["total_ssds"] = args.total_ssds;
-        params_and_results["m"] = args.m;
-        params_and_results["k"] = args.k;
-        params_and_results["l"] = args.l;
-        params_and_results["cached_ssds"] = args.cached_ssds;
-        params_and_results["cached_m"] = args.cached_m;
-        params_and_results["cached_k"] = args.cached_k;
-        params_and_results["cached_l"] = args.cached_l;
-        params_and_results["cached_network_m"] = cached_network_m;
-        params_and_results["cached_network_k"] = args.cached_network_k;
-        params_and_results["cached_network_l"] = args.cached_network_l;
-        params_and_results["inter_replicas"] = args.inter_replicas;
-        params_and_results["intra_replicas"] = args.intra_replicas;
-        params_and_results["cached_write_ratio"] = args.cached_write_ratio;
-        params_and_results["network_m"] = args.network_m;
-        params_and_results["network_k"] = args.network_k;
-        params_and_results["network_l"] = args.network_l;
-        params_and_results["capacity"] = args.capacity;
-        params_and_results["qlc"] = args.qlc;
-        params_and_results["simulation"] = args.simulation;
-        params_and_results["dwpd"] = args.dwpd;
-        params_and_results["guaranteed_years"] = args.guaranteed_years;
-        params_and_results["dwpd_limit"] = dwpd_limit;
-        params_and_results["ssd_read_bw"] = read_bw;
-        params_and_results["ssd_write_bw"] = write_bw;
+    // Prepare simulation parameters
+    std::map<std::string, nlohmann::json> params_and_results;
+    params_and_results["total_ssds"] = args.total_ssds;
+    params_and_results["m"] = args.m;
+    params_and_results["k"] = args.k;
+    params_and_results["l"] = args.l;
+    params_and_results["cached_ssds"] = args.cached_ssds;
+    params_and_results["cached_m"] = args.cached_m;
+    params_and_results["cached_k"] = args.cached_k;
+    params_and_results["cached_l"] = args.cached_l;
+    params_and_results["cached_network_m"] = cached_network_m;
+    params_and_results["cached_network_k"] = args.cached_network_k;
+    params_and_results["cached_network_l"] = args.cached_network_l;
+    params_and_results["inter_replicas"] = args.inter_replicas;
+    params_and_results["intra_replicas"] = args.intra_replicas;
+    params_and_results["cached_write_ratio"] = args.cached_write_ratio;
+    params_and_results["network_m"] = args.network_m;
+    params_and_results["network_k"] = args.network_k;
+    params_and_results["network_l"] = args.network_l;
+    params_and_results["capacity"] = args.capacity;
+    params_and_results["qlc"] = args.qlc;
+    params_and_results["dwpd"] = args.dwpd;
+    params_and_results["guaranteed_years"] = args.guaranteed_years;
+    params_and_results["dwpd_limit"] = dwpd_limit;
+    params_and_results["ssd_read_bw"] = read_bw;
+    params_and_results["ssd_write_bw"] = write_bw;
 
-        if (args.qlc_cache) {
-            params_and_results["qlc_cache"] = true;
-            params_and_results["cached_dwpd_limit"] = qlc_dwpd;
-            params_and_results["cached_ssd_read_bw"] = qlc_read_bw;
-            params_and_results["cached_ssd_write_bw"] = qlc_write_bw;
-        } else {
-            params_and_results["qlc_cache"] = false;
-            params_and_results["cached_dwpd_limit"] = tlc_dwpd;
-            params_and_results["cached_ssd_read_bw"] = tlc_read_bw;
-            params_and_results["cached_ssd_write_bw"] = tlc_write_bw;
-        }
+    if (args.qlc_cache) {
+        params_and_results["qlc_cache"] = true;
+        params_and_results["cached_dwpd_limit"] = qlc_dwpd;
+        params_and_results["cached_ssd_read_bw"] = qlc_read_bw;
+        params_and_results["cached_ssd_write_bw"] = qlc_write_bw;
+    } else {
+        params_and_results["qlc_cache"] = false;
+        params_and_results["cached_dwpd_limit"] = tlc_dwpd;
+        params_and_results["cached_ssd_read_bw"] = tlc_read_bw;
+        params_and_results["cached_ssd_write_bw"] = tlc_write_bw;
+    }
 
-        params_and_results["config_file"] = args.config_file;
-        params_and_results["nprocs"] = args.nprocs;
-        params_and_results["box_mttf"] = args.box_mttf;
-        params_and_results["io_module_mttr"] = args.io_module_mttr;
-        params_and_results["active_active"] = args.active_active;
-        params_and_results["single_port_ssd"] = args.single_port_ssd;
-        params_and_results["rebuild_bw_ratio"] = args.rebuild_bw_ratio;
-        params_and_results["target_perf_ratio"] = args.target_perf_ratio;
+    params_and_results["config_file"] = args.config_file;
+    params_and_results["nprocs"] = args.nprocs;
+    params_and_results["box_mttf"] = args.box_mttf;
+    params_and_results["io_module_mttr"] = args.io_module_mttr;
+    params_and_results["active_active"] = args.active_active;
+    params_and_results["single_port_ssd"] = args.single_port_ssd;
+    params_and_results["rebuild_bw_ratio"] = args.rebuild_bw_ratio;
+    params_and_results["target_perf_ratio"] = args.target_perf_ratio;
 
-        // Set SSD failure trace file (CLI overrides JSON config)
-        if (!args.ssd_failure_trace.empty()) {
-            options["ssd_failure_trace"] = args.ssd_failure_trace;
-        }
+    // Set SSD failure trace file (CLI overrides JSON config)
+    if (!args.ssd_failure_trace.empty()) {
+        options["ssd_failure_trace"] = args.ssd_failure_trace;
+    }
 
-        // Run simulation
-        int num_simulations = 80000;
-        monte_carlo_simulation(params_and_results, hardware_graph, num_simulations, options, costs);
+    // Run simulation
+    int num_simulations = 80000;
+    monte_carlo_simulation(params_and_results, hardware_graph, num_simulations, options, costs);
 
-        // Output results
-        std::cout << "\nSimulation Results:" << std::endl;
-        std::cout << "  Availability: " << params_and_results["availability"] << std::endl;
-        std::cout << "  Availability (nines): " << params_and_results["avail_nines"] << std::endl;
+    // Output results
+    std::cout << "\nSimulation Results:" << std::endl;
+    std::cout << "  Availability: " << params_and_results["availability"] << std::endl;
+    std::cout << "  Availability (nines): " << params_and_results["avail_nines"] << std::endl;
 
-        // Write to output file if needed
-        if (!args.no_result) {
-            Utils::write_results_to_csv(args.output_file, params_and_results);
-            std::cout << "  Results written to: " << args.output_file << std::endl;
-        }
+    // Write to output file if needed
+    if (!args.no_result) {
+        Utils::write_results_to_csv(args.output_file, params_and_results);
+        std::cout << "  Results written to: " << args.output_file << std::endl;
     }
 
     return 0;

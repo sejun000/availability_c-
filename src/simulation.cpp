@@ -331,7 +331,8 @@ void calculate_flows_and_speed(
     std::map<FailureStateKey, FlowsAndSpeedEntry>& flows_and_speed_table,
     double max_read_performance_without_any_failure,
     const DisconnectedStatus& disconnected,
-    const FailureStateKey& key) {
+    const FailureStateKey& key,
+    const SSDIOModuleManager* ssd_io_manager) {
 
     if (flows_and_speed_table.find(key) != flows_and_speed_table.end()) {
         return;
@@ -446,11 +447,30 @@ void calculate_flows_and_speed(
                 rebuild_speed_up = degraded_ssds > 0 ? degraded_ssds : 1;
             }
 
+            // Check if EC group crosses io_module boundary
+            // If so, rebuild traffic must go through switch, adding switch bandwidth as bottleneck
+            std::vector<double> degraded_bws = {local_ssd_read_bw};
+            std::vector<double> rebuilding_bws = {local_ssd_read_bw, ssd_write_bw * rebuild_speed_up};
+
+            if (ssd_io_manager != nullptr && !ssd_io_manager->is_legacy_mode()) {
+                bool crosses_boundary = ssd_io_manager->does_ec_group_cross_io_module(start_ssd_idx, group_size);
+                Logger::getInstance().info("EC group " + std::to_string(group_index) + " (SSD " +
+                    std::to_string(start_ssd_idx) + "~" + std::to_string(start_ssd_idx + group_size - 1) +
+                    ") crosses io_module: " + (crosses_boundary ? "YES" : "NO"));
+                if (crosses_boundary) {
+                    // EC group spans multiple io_modules, rebuild goes through switch
+                    // Use common_module_max_flow (switch bandwidth) as additional bottleneck
+                    // Divide by number of groups that might share the switch
+                    double switch_bw_per_group = common_module_max_flow / std::max(1, static_cast<int>(failure_info_per_ssd_group.size()));
+                    degraded_bws.push_back(switch_bw_per_group);
+                    rebuilding_bws.push_back(switch_bw_per_group);
+                }
+            }
+
             double degraded_bw = calculate_bottleneck_speed(ssd_m, local_failure_count,
-                                                           {local_ssd_read_bw}, options, intra_replication);
+                                                           degraded_bws, options, intra_replication);
             double rebuilding_bw = calculate_bottleneck_speed(ssd_m, local_failure_count,
-                                                             {local_ssd_read_bw, ssd_write_bw * rebuild_speed_up},
-                                                             options, intra_replication);
+                                                             rebuilding_bws, options, intra_replication);
 
             if (prefix == "cached_") {
                 entry.cached_intra_rebuilding_bw[local_failure_count] = rebuilding_bw;
