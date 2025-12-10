@@ -1,0 +1,89 @@
+================================================================================
+Spliced Distribution for SSD Failure Time Modeling
+================================================================================
+
+1. Problem
+----------
+- Alibaba trace: 7,434 SSD failures observed over 1 year
+- S1 column: power-on time (age) at failure
+- Issue: only failed SSDs are recorded, ~99.26% that didn't fail are missing
+- Raw trace usage overestimates failure rate by ~120x
+
+2. Available Data
+-----------------
+- ARR (Annual Replacement Rate): ~0.74%
+- MTTF from ARR: 1/0.0074 = 135 years = 1,182,600 hours
+- Trace distribution: empirical CDF of S1 values (mean ~9,672 hours)
+- T_max: maximum S1 value in trace
+
+3. Spliced Distribution Approach
+--------------------------------
+Use empirical distribution where data exists, exponential tail for extrapolation.
+
+Parameters:
+- T_max = max(trace S1 values)
+- MTTF = 1/ARR (e.g., 135 years)
+- p = P(Exp(MTTF) <= T_max) = 1 - exp(-T_max/MTTF)
+
+Sampling Algorithm:
+```
+u ~ Uniform(0, 1)
+if u < p:
+    return trace.sample()           # Empirical distribution
+else:
+    return T_max + Exponential(MTTF)  # Exponential tail
+```
+
+4. Mathematical Validation
+--------------------------
+Resulting CDF:
+
+F(t) = { p * F_trace(t)                              if t <= T_max
+       { p + (1-p) * (1 - exp(-(t-T_max)/MTTF))      if t > T_max
+
+Verification:
+(a) Continuity at T_max:
+    - From below: p * F_trace(T_max) = p * 1 = p
+    - From above: p + (1-p) * 0 = p
+    - Continuous!
+
+(b) Proper CDF:
+    - F(0) = 0 (assuming F_trace(0) = 0)
+    - F(infinity) = p + (1-p) * 1 = 1
+
+(c) Expected value:
+    E[X] = p * E[trace] + (1-p) * (T_max + MTTF)
+
+    Since p is small (~3-4%), the overall mean is approximately MTTF,
+    which is consistent with the observed ARR.
+
+5. Why This Works
+-----------------
+- [0, T_max]: Use real empirical data (captures early failure patterns)
+- (T_max, infinity): No data available, use exponential extrapolation
+- Exponential memoryless property: P(X > T_max + t | X > T_max) = P(X > t)
+  So sampling T_max + Exp(MTTF) gives correct conditional distribution
+- Overall failure rate matches ARR (validated by expected value)
+
+6. Assumptions & Limitations
+----------------------------
+- Assumes exponential tail beyond T_max (standard in reliability engineering)
+- Trace distribution shape within [0, T_max] is trusted
+- MTTF derived from ARR may have uncertainty
+- Splicing point T_max determined by data availability, not physical meaning
+
+7. Implementation
+-----------------
+Config (JSON):
+{
+    "ssd_arr": 0.0074,           // Annual Replacement Rate
+    "ssd_failure_trace": "ssd_failure_times.txt"
+}
+
+Code:
+- Load trace file -> build empirical CDF, get T_max
+- Calculate MTTF = 1/ARR (in hours: 1/(ARR) * 365 * 24)
+- Calculate p = 1 - exp(-T_max/MTTF)
+- Sample using spliced distribution algorithm
+
+================================================================================
