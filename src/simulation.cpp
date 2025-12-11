@@ -447,23 +447,40 @@ void calculate_flows_and_speed(
                 rebuild_speed_up = degraded_ssds > 0 ? degraded_ssds : 1;
             }
 
-            // Check if EC group crosses io_module boundary
-            // If so, rebuild traffic must go through switch, adding switch bandwidth as bottleneck
+            // Calculate rebuild bandwidth based on LCA (Lowest Common Ancestor)
+            // Get io_modules for all SSDs in EC group and find their LCA
             std::vector<double> degraded_bws = {local_ssd_read_bw};
             std::vector<double> rebuilding_bws = {local_ssd_read_bw, ssd_write_bw * rebuild_speed_up};
 
             if (ssd_io_manager != nullptr && !ssd_io_manager->is_legacy_mode()) {
+                // Check if EC group crosses io_module boundary
+                // This means different SSDs in the group connect to different io_module sets
                 bool crosses_boundary = ssd_io_manager->does_ec_group_cross_io_module(start_ssd_idx, group_size);
-                Logger::getInstance().info("EC group " + std::to_string(group_index) + " (SSD " +
-                    std::to_string(start_ssd_idx) + "~" + std::to_string(start_ssd_idx + group_size - 1) +
-                    ") crosses io_module: " + (crosses_boundary ? "YES" : "NO"));
+
                 if (crosses_boundary) {
-                    // EC group spans multiple io_modules, rebuild goes through switch
-                    // Use common_module_max_flow (switch bandwidth) as additional bottleneck
-                    // Divide by number of groups that might share the switch
-                    double switch_bw_per_group = common_module_max_flow / std::max(1, static_cast<int>(failure_info_per_ssd_group.size()));
-                    degraded_bws.push_back(switch_bw_per_group);
-                    rebuilding_bws.push_back(switch_bw_per_group);
+                    // Get all unique io_modules for SSDs in this EC group
+                    std::set<std::string> ec_group_io_modules = ssd_io_manager->get_io_modules_for_ec_group(start_ssd_idx, group_size);
+                    // EC group spans multiple io_modules
+                    // Calculate max flow from LCA level to target io_module using graph structure
+                    std::vector<std::string> source_modules(ec_group_io_modules.begin(), ec_group_io_modules.end());
+                    // Use first io_module as representative target (rebuild goes to any failed SSD in group)
+                    std::string target_module = *ec_group_io_modules.begin();
+
+                    double lca_max_flow = hw_copy.calculate_rebuild_max_flow_via_io_modules(source_modules, target_module);
+
+                    Logger::getInstance().info("EC group " + std::to_string(group_index) + " (SSD " +
+                        std::to_string(start_ssd_idx) + "~" + std::to_string(start_ssd_idx + group_size - 1) +
+                        ") crosses io_module boundary, LCA max flow: " + std::to_string(lca_max_flow / 1e9) + " GB/s");
+
+                    // Add LCA-based bandwidth as bottleneck
+                    // Divide by number of groups that might share the common ancestor
+                    double lca_bw_per_group = lca_max_flow / std::max(1, static_cast<int>(failure_info_per_ssd_group.size()));
+                    degraded_bws.push_back(lca_bw_per_group);
+                    rebuilding_bws.push_back(lca_bw_per_group);
+                } else {
+                    Logger::getInstance().info("EC group " + std::to_string(group_index) + " (SSD " +
+                        std::to_string(start_ssd_idx) + "~" + std::to_string(start_ssd_idx + group_size - 1) +
+                        ") within same io_module set, no network bottleneck");
                 }
             }
 

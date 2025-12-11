@@ -149,6 +149,9 @@ initialize_simulation(
     std::string end_module = options["end_module"];
     std::string lowest_common_module = options["lowest_common_module"];
 
+    // Build parent map for LCA calculation (used for rebuild bandwidth calculation)
+    hardware_graph.build_parent_map(start_module);
+
     hardware_graph_copy.add_virtual_nodes(start_module, end_module);
     double max_flow_hardware = hardware_graph_copy.maximum_flow("virtual_source", "virtual_sink");
     hardware_graph_copy.remove_virtual_nodes();
