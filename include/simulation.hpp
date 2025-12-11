@@ -8,107 +8,95 @@
 #include <cstdint>
 #include <nlohmann/json.hpp>
 #include "graph_structure.hpp"
-#include "ssd.hpp"
+#include "disk.hpp"
+#include "erasure_coding.hpp"
 #include "utils.hpp"
 
 constexpr double BIG_NUMBER = 1e15;
 constexpr double SOFT_ERROR_THRESHOLD_HOURS = 1.0;
 
-// SSD States
-const std::string SSD_STATE_NORMAL = "normal";
-const std::string SSD_STATE_INTRA_REBUILDING = "intra_rebuilding";
-const std::string SSD_STATE_INTER_REBUILDING = "inter_rebuilding";
-const std::string SSD_STATE_INTER_DEGRADED = "inter_degraded";
-const std::string SSD_STATE_DATA_LOSS = "data_loss";
+// Disk States (for state machine)
+const std::string DISK_STATE_NORMAL = "normal";
+const std::string DISK_STATE_DISCONNECTED = "disconnected";
+const std::string DISK_STATE_FAILED = "failed";
+const std::string DISK_STATE_REBUILDING = "rebuilding";
+const std::string DISK_STATE_DATA_LOSS = "data_loss";
 
 // Event structure for priority queue
 struct Event {
     double time;
-    std::string event_type;  // "fail", "repair", "network"
+    std::string event_type;  // "fail", "repair", "disconnect", "reconnect"
     std::string event_node;
     double prev_time;
     double start_time;
-    bool software_repair_only;
+    bool software_repair_only;  // For io_module: software fault (quick repair) vs hardware fault
 
     bool operator>(const Event& other) const {
         return time > other.time;
     }
 };
 
-// SSD information structure
-struct SSDInfo {
-    bool failed;
-    double remaining_prep_time_for_rebuilding;
-    double remaining_capacity_to_rebuild;
-    double rebuild_speed;
-    double disconnected_timestamp;
-    std::string state;
+// Failure information per EC group
+struct ECGroupFailureInfo {
+    int disk_failure_count = 0;          // Number of physically failed disks
+    int disconnected_count = 0;          // Number of disconnected disks
+    std::set<int> failed_disk_indices;   // Indices of failed disks
+    std::set<int> disconnected_disk_indices;  // Indices of disconnected disks
 
-    SSDInfo() : failed(false), remaining_prep_time_for_rebuilding(0),
-                remaining_capacity_to_rebuild(0), rebuild_speed(0),
-                disconnected_timestamp(0), state(SSD_STATE_NORMAL) {}
+    // Get total unavailable disks
+    int get_unavailable_count() const {
+        std::set<int> all_unavailable = failed_disk_indices;
+        all_unavailable.insert(disconnected_disk_indices.begin(), disconnected_disk_indices.end());
+        return static_cast<int>(all_unavailable.size());
+    }
+
+    // Check if specific disk is unavailable
+    bool is_disk_unavailable(int disk_index) const {
+        return failed_disk_indices.count(disk_index) > 0 ||
+               disconnected_disk_indices.count(disk_index) > 0;
+    }
 };
 
-// Failure information per SSD group
-struct FailureInfo {
-    int failure_count;
-    int network_failure_count;
-
-    FailureInfo() : failure_count(0), network_failure_count(0) {}
-};
-
-// Disconnection status
+// Disconnection status for tracking which components are down
 struct DisconnectedStatus {
-    bool local_module;
-    bool common_module;
-    std::map<int, bool> ssd_disconnected;  // SSD index -> disconnected due to io_module failure
+    std::map<std::string, bool> failed_nodes;  // node_name -> is_failed
+    std::map<int, bool> disk_disconnected;     // disk_index -> is_disconnected (due to upstream failure)
 
-    DisconnectedStatus() : local_module(false), common_module(false) {}
+    DisconnectedStatus() = default;
 
-    // Get count of disconnected SSDs in a group
-    int get_disconnected_count_in_group(int start_ssd_index, int group_size) const {
+    // Get count of disconnected disks in a group
+    int get_disconnected_count_in_group(int start_disk_index, int group_size) const {
         int count = 0;
-        for (int i = start_ssd_index; i < start_ssd_index + group_size; ++i) {
-            auto it = ssd_disconnected.find(i);
-            if (it != ssd_disconnected.end() && it->second) {
+        for (int i = start_disk_index; i < start_disk_index + group_size; ++i) {
+            auto it = disk_disconnected.find(i);
+            if (it != disk_disconnected.end() && it->second) {
                 count++;
             }
         }
         return count;
     }
 
-    // Check if specific SSD is disconnected
-    bool is_ssd_disconnected(int ssd_index) const {
-        auto it = ssd_disconnected.find(ssd_index);
-        return it != ssd_disconnected.end() && it->second;
+    // Check if specific disk is disconnected
+    bool is_disk_disconnected(int disk_index) const {
+        auto it = disk_disconnected.find(disk_index);
+        return it != disk_disconnected.end() && it->second;
+    }
+
+    // Mark disk as disconnected
+    void set_disk_disconnected(int disk_index, bool disconnected) {
+        disk_disconnected[disk_index] = disconnected;
     }
 };
 
-// Availability ratio
-struct AvailabilityRatio {
-    double availability;
-    double cached_availability;
-
-    AvailabilityRatio() : availability(1.0), cached_availability(1.0) {}
-};
-
-// Flow and speed tables
+// Flow and speed calculation result
 struct FlowsAndSpeedEntry {
-    std::map<int, double> intra_rebuilding_bw;
-    std::map<int, double> inter_rebuilding_bw;
-    double backup_rebuild_speed;
-    std::map<int, double> cached_intra_rebuilding_bw;
-    std::map<int, double> cached_inter_rebuilding_bw;
-    double cached_backup_rebuild_speed;
-    int up_first_group;
+    std::map<int, double> rebuild_bandwidth;  // failure_count -> rebuild_bandwidth
+    double read_bandwidth = 0.0;              // Available read bandwidth
+    double write_bandwidth = 0.0;             // Available write bandwidth
+    double availability_ratio = 1.0;          // Current availability (0 if data loss)
+    double data_loss_ratio = 0.0;             // Fraction of data lost
 
-    AvailabilityRatio availability_ratio;
-    double eff_availability_ratio;
-    double credit_availability_ratio;
-
-    FlowsAndSpeedEntry() : backup_rebuild_speed(0), cached_backup_rebuild_speed(0),
-                           up_first_group(1), eff_availability_ratio(1.0),
-                           credit_availability_ratio(1.0) {}
+    FlowsAndSpeedEntry() = default;
 };
 
 // Key structures for caching
@@ -122,107 +110,65 @@ struct NodeFailureKey {
 
 struct FailureStateKey {
     NodeFailureKey node_key;
-    std::vector<uint8_t> failure_counts;
-    std::vector<uint8_t> network_failure_counts;
+    std::vector<uint8_t> failure_counts;  // Per EC group failure counts
 
     bool operator<(const FailureStateKey& other) const {
         if (node_key < other.node_key) return true;
         if (other.node_key < node_key) return false;
-        if (failure_counts < other.failure_counts) return true;
-        if (other.failure_counts < failure_counts) return false;
-        return network_failure_counts < other.network_failure_counts;
+        return failure_counts < other.failure_counts;
     }
 };
 
 // Simulation parameters
 struct SimulationParams {
-    int m, k, l;
-    int cached_m, cached_k, cached_l;
-    int network_m, network_k, network_l;
-    int cached_network_m, cached_network_k, cached_network_l;
-    int total_ssds;
-    int cached_ssds;
-    int inter_replicas, intra_replicas;
-    double cached_write_ratio;
-    double capacity;
-    double dwpd, dwpd_limit;
-    double cached_dwpd_limit;
-    double guaranteed_years;
-    double read_bw, write_bw;
-    double cached_read_bw, cached_write_bw;
-    bool qlc, qlc_cache;
-    double box_mttf, io_module_mttr;
-    double rebuild_bw_ratio;
-    double target_perf_ratio;
-    bool active_active;
-    bool single_port_ssd;
-    int nprocs;
-    int simulation_years;
+    // EC configuration
+    ECConfig ec_config;
+
+    // Disk parameters
+    int total_disks = 0;
+    double disk_capacity = 0;        // Capacity per disk in bytes
+    double disk_read_bw = 0;         // Read bandwidth per disk
+    double disk_write_bw = 0;        // Write bandwidth per disk
+    double disk_mttf = 0;            // Mean time to failure for disks
+    double disk_replace_time = 0;    // Time to replace a failed disk (hours)
+
+    // Rebuild parameters
+    double rebuild_bw_ratio = 0.2;   // Fraction of bandwidth used for rebuild
+    double degraded_ratio = 0.2;     // Fraction of bandwidth for degraded read
+
+    // Simulation control
+    int nprocs = 40;
+    int simulation_years = 10;
+
+    // EC encoding speed (bytes/sec for m+k encoding)
+    double ec_encoding_speed = 0;
 };
 
-// Network availability table structure
-struct NetworkAvailabilityTable {
-    std::map<int, double> availability;
-    std::map<int, double> cached_availability;
+// Simulation result structure
+struct SimulationResult {
+    double up_time = 0.0;
+    double simulation_time = 0.0;
+    double availability = 0.0;
+    double mttdl = 0.0;                     // Mean time to data loss
+    int data_loss_events = 0;               // Number of data loss events
+    double total_data_loss_ratio = 0.0;     // Total fraction of data lost
+    double durability = 0.0;                // 1 - (data_loss_ratio per year)
+    double time_for_rebuilding = 0.0;
+    int count_for_rebuilding = 0;
+    double average_read_bandwidth = 0.0;
+    double average_write_bandwidth = 0.0;
 };
 
 // Simulation helper functions
 double pfail(int m, int k, int l, int x);
 double calculate_bottleneck_speed(int m, int k, const std::vector<double>& other_bws,
-                                   const nlohmann::json& options, bool replication = false);
-double get_dram_bandwidth(const nlohmann::json& options);
-double nine_to_credit(double nine);
-double combinations_count(int n, int k);
-
-// Network failure functions
-void generate_network_failure_table(
-    int cached_network_n,
-    int network_n,
-    double availability_without_network_parity,
-    double availability_without_network_parity_for_cached_ssds,
-    NetworkAvailabilityTable& network_availability_table);
-
-bool update_network_state(
-    std::map<int, FailureInfo>& failure_info_per_ssd_group,
-    const SSDRedundancyScheme& ssd_redun_scheme,
-    const NetworkAvailabilityTable& network_availability_table);
-
-// Cost calculation functions
-double get_coefficient_for_cost(const std::string& module, const nlohmann::json& options);
-
-double calculate_module_cost(
-    const std::string& node,
-    const std::map<std::string, std::string>& node_to_module_map,
-    const std::map<std::string, double>& costs,
-    const SSDRedundancyScheme& ssd_redun_scheme,
-    double cached_ssd_cost,
-    double uncached_ssd_cost,
-    const nlohmann::json& options);
-
-std::tuple<double, double, double> get_initial_cost(
-    const GraphStructure& hardware_graph,
-    const std::map<std::string, std::string>& node_to_module_map,
-    int ssd_total_count,
-    const SSDRedundancyScheme& ssd_redun_scheme,
-    double cached_ssd_cost,
-    double uncached_ssd_cost,
-    const std::map<std::string, double>& costs,
-    const nlohmann::json& options);
+                                   double rebuild_bw_ratio, double ec_encoding_speed);
 
 // State management
-std::string judge_state_from_failure_info(const FailureInfo& failure_info,
-                                          const SSDRedundancyScheme& ssd_redun_scheme,
-                                          const DisconnectedStatus& disconnected,
-                                          bool cached,
-                                          bool ignore_disconnected = false);
+std::string judge_state_from_failure_info(const ECGroupFailureInfo& failure_info,
+                                          const ECConfig& ec_config);
 
-bool is_catastrophic_failure(const FailureInfo& failure_info, int ssd_k, bool local_module_disconnected);
-
-bool is_other_nodes_catastrophic_failure_and_recoverable(
-    const FailureInfo& failure_info,
-    int ssd_k,
-    int network_k,
-    const DisconnectedStatus& disconnected);
+bool is_data_loss(const ECGroupFailureInfo& failure_info, const ECConfig& ec_config);
 
 // Event management
 void push_failed_event(
@@ -231,9 +177,9 @@ void push_failed_event(
     double current_time,
     const std::map<std::string, std::string>& node_to_module_map,
     const GraphStructure& hardware_graph,
-    const SSDRedundancyScheme& ssd_redun_scheme,
-    const EmpiricalCDF* ssd_failure_cdf = nullptr,
-    double ssd_arr = 0.0);
+    double disk_mttf,
+    const EmpiricalCDF* disk_failure_cdf = nullptr,
+    double disk_arr = 0.0);
 
 void push_repair_event(
     std::priority_queue<Event, std::vector<Event>, std::greater<Event>>& repair_events,
@@ -251,66 +197,65 @@ Event pop_event(
 std::priority_queue<Event, std::vector<Event>, std::greater<Event>> generate_first_failure_events(
     const GraphStructure& hardware_graph,
     const std::map<std::string, std::string>& node_to_module_map,
-    int ssd_total_count,
-    const SSDRedundancyScheme& ssd_redun_scheme,
-    const EmpiricalCDF* ssd_failure_cdf = nullptr,
-    double ssd_arr = 0.0);
+    int total_disks,
+    double disk_mttf,
+    const EmpiricalCDF* disk_failure_cdf = nullptr,
+    double disk_arr = 0.0);
 
 void update_failure_info(
     const std::string& event_type,
     const std::string& event_node,
-    std::map<int, FailureInfo>& failure_info_per_ssd_group,
+    std::map<int, ECGroupFailureInfo>& failure_info_per_ec_group,
     std::map<std::string, bool>& failed_nodes_and_enclosures,
-    const SSDRedundancyScheme& ssd_redun_scheme);
+    const ErasureCodingScheme& ec_scheme);
 
 // Flow and speed calculation
 void calculate_flows_and_speed(
-    const GraphStructure& hardware_graph_copy,
-    const std::map<int, FailureInfo>& failure_info_per_ssd_group,
-    const SSDRedundancyScheme& ssd_redun_scheme,
-    const nlohmann::json& options,
+    GraphStructure& hardware_graph_copy,
+    const std::map<int, ECGroupFailureInfo>& failure_info_per_ec_group,
+    const ErasureCodingScheme& ec_scheme,
+    const SimulationParams& params,
     std::map<FailureStateKey, FlowsAndSpeedEntry>& flows_and_speed_table,
     double max_read_performance_without_any_failure,
     const DisconnectedStatus& disconnected,
     const FailureStateKey& key,
-    const SSDIOModuleManager* ssd_io_manager = nullptr);
+    const DiskIOModuleManager* disk_io_manager = nullptr);
 
-// SSD state update functions
-void update_all_ssd_states(
-    const std::map<int, FailureInfo>& failure_info_per_ssd_group,
-    std::map<int, SSDInfo>& SSDs,
-    const SSDRedundancyScheme& ssd_redun_scheme,
+// Disk state update functions
+void update_all_disk_states(
+    const std::map<int, ECGroupFailureInfo>& failure_info_per_ec_group,
+    std::map<int, DiskInfo>& disks,
+    const ErasureCodingScheme& ec_scheme,
     const DisconnectedStatus& disconnected,
     double current_time);
 
-void update_ssd_state(
-    const std::string& ssd_name,
-    const std::map<int, FailureInfo>& failure_info_per_ssd_group,
-    std::map<int, SSDInfo>& SSDs,
+void update_disk_state(
+    int disk_index,
+    const std::map<int, ECGroupFailureInfo>& failure_info_per_ec_group,
+    std::map<int, DiskInfo>& disks,
     double capacity,
     const std::string& event_type,
-    double prep_time_for_rebuilding,
-    const SSDRedundancyScheme& ssd_redun_scheme,
+    double replace_time,
+    const ErasureCodingScheme& ec_scheme,
     const DisconnectedStatus& disconnected);
 
-void update_failure_event_for_SSDs(
+void update_failure_event_for_disks(
     std::priority_queue<Event, std::vector<Event>, std::greater<Event>>& failed_events,
     double current_time,
-    std::map<int, SSDInfo>& SSDs);
+    std::map<int, DiskInfo>& disks);
 
-void update_repair_event_for_SSDs(
+void update_repair_event_for_disks(
     std::priority_queue<Event, std::vector<Event>, std::greater<Event>>& repair_events,
     double current_time,
-    std::map<int, SSDInfo>& SSDs,
+    std::map<int, DiskInfo>& disks,
     const FlowsAndSpeedEntry& flows_and_speed_entry,
-    const std::map<int, FailureInfo>& failure_info_per_ssd_group,
-    const SSDRedundancyScheme& ssd_redun_scheme);
+    const std::map<int, ECGroupFailureInfo>& failure_info_per_ec_group,
+    const ErasureCodingScheme& ec_scheme);
 
 // Main simulation function
 void monte_carlo_simulation(
     std::map<std::string, nlohmann::json>& params_and_results,
     const GraphStructure& graph_structure_origin,
     int num_simulations,
-    const nlohmann::json& options,
-    const std::map<std::string, double>& costs
+    const nlohmann::json& options
 );

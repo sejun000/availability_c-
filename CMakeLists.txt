@@ -20,7 +20,8 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 set(SOURCES
     src/utils.cpp
     src/graph_structure.cpp
-    src/ssd.cpp
+    src/disk.cpp
+    src/erasure_coding.cpp
     src/simulation.cpp
     src/simulation_helpers.cpp
     src/simulation_core.cpp

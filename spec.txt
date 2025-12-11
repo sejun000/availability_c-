@@ -1,0 +1,78 @@
+# refactoring
+
+일단 시나리오 베이스로 다 적어 줄게. 이상한거 있으면 물어봐 
+
+지금 입력(json, command parameter)은 비슷하게 받되 erasure coding layout은 json으로 입력받도록 하자. 
+
+출력(csv 출력) 중에는 availability 외에 credit관련 된건 다 삭제하자. 비용관련 내용도 다 삭제하자 뭐 SSD가 얼마라든지 io module이 얼마인 내용 다 삭제하자. 나머지 json 혹은 command parameter를 출력(csv)에 넣는것은 그대로 두자. durability와 mttf를 측정할건데 그건 너가 알아서 로직 짜봐 (이따가 erasure coding에서 나오는 data loss 비율로 추가하면 될듯) 
+
+failure발생 로직과 repair 로직도 비슷하게 둘거야.  즉, event driven 하게 simulation이 진행되는 건 그대로 둘거야 
+
+parallel 하게 nprocs만큼 돌리는 것도 그대로 둘거야. 
+
+cache tier SSD 와 관련된 내용은 다 제거해줘 disk는 다 동일한 것으로만 구성할 거야 
+
+declustered parity 옵션은 삭제 해줘. 
+
+last_avail.txt로 출력하는 것도 삭제해줘 
+
+network_failure_count 이런거 필요없어 삭제하자. erasure coding 구현을 새로 하는게 좋을 거 같아. 
+
+모든 SSD는 disk라는 이름으로 써. 내가 아래에 SSD라고 써도 그건 disk인 거야. 
+
+## 구조
+
+현재처럼 graph 구조를 입력받자. 각 module + 숫자 형태로 vertex를 표현하고 같은 prefix(module 이름)을 가지면 같은 모듈이야. module의 특성도 받는데 비용 관련건 삭제해줘 .
+
+그리고 지금 disk 자체는 graph에 포함되어 있지 않은데 disk까지 방향 graph에 다 연결할거야. 
+
+disk는 동일타입의 disk만 끼울 수 있어. 현재 처럼 io module 밑에만 붙고 io_module 몇번에 속하는지 입력받는건 현재와 동일하게 해줘. 
+
+현재는 단방향 그래프지만 양방향 그래프 (보통 network는 양방향) 로 리팩토링 해줘. 이때 디바이스단은 read/write속도가 다르면 그걸 고려하여 양방향 그래프로 그려줘. 
+
+graph를 나타내는 방식이라든지 모듈 안에 번호로 graph 상의 vertex를 구분하는 것은 동일하게 가져가줘. 
+
+예전 코드에서는 fail 상태에 따라 hash key를 만들었을텐데 마찬가지로 key1 : disk를 제외한 그래프에서 각 disk 까지의 connectivity를 알려주는 역할, key2 : 특정 failure 상황에서 rebuild bandwidth 등이나 그 단위 시간의 availability를 계산하는 용도로 사용하자. 
+
+SSD 얼마나 rebuild(capacity) 상태를 남겨두는 것은 그대로 두자. 즉, 각 상태 (repair, failure) 마다 속도가 달라짐에 따라 rebuild 속도에 영향을 미치고 그때그때 재계산하는 루틴이 현재도 있을텐데 현재도 그렇게 하자. SSD는 rebuild가 끝나면 repair 하는 것으로 하자. 
+
+rebuild는 failure 가 각 device에서 발생했을 때, fail 난 디바이스 기준으로 erasure coding 이 복구할 수 있으면 (즉, 22+2인데 2개 이하로 fail이 발생했으면) 나머지 22개 (즉 m)으로부터 fail disk로 가는 (2개?) max flow * rebuild_ratio 와 erasure coding 의 speed를 비교하여 작은 값을 취해서 rebuild 속도로 지정해주고 그 경로에 있는 edge의 bandwidth의 그 유량을 빼줘 . 그 rebuild 유량 제외하고 read write 를 할수 있다고 해줘. read는 disk로부터 switch로 가는 흐름. write는 switch로 부터 disk로 가는 흐름을 계산해줘. 
+
+degraded read도 생길수 있어. 복구 중이거나 fail 난 disk에 접근하려고 했을 때, 그 disk 말고 나머지 22개(즉 m)의 읽기 * degraded_ratio와 erasure coding 의 speed중 작은 값을 취해서(degraded read 속도) edge의 bandwidth를 22개(m)의 disk 유량에서 읽기 속도를 degraded read 속도만큼 떨어뜨리고 그 숫자 * 1만큼  fail disk에 I/O유량으로 읽을수 있다고 bandwidth를 지정하자 (다시 올리는 이유는 degraded read만큼은 성능을 다시 보여줘야 하기 때문에) write는 그냥 그 fail disk에 그 성능 그대로 간다고 하자. 
+
+vertex fail 났을 때 graph의 vertex를 제거하는 등 혹은 영향을 받은 bandwidth에 놓인 edge를 실제로 수정해주고 다 max flow를 계산한다음에는 수정된 그래프를 원상 복구하자.  disk fail시는 그 Vertex를 제거하면 안되 이유는 그 vertex로 가는 유량이 있기 때문이지 (degraded read혹은 write), graph 자체는 그냥 인접행렬로 구현해도 되지 않을까? 애초에 edge가 많지 않으면 인접 리스트가 나으려나 ? 라이브러리 있으면 그냥 그걸로 해. 
+
+disk마다 disconnect 상태를 남겨주고 disconnect가 이뤄진 disk 말고 나머지로 erasure coding으로 degraded read해야 하는지 살펴. 그리고 disconnect는 disk 자체 fail과 다르기 때문에, disconnect 된 시간에 비례하여 rebuild 가 필요한 것으로 디자인 해줘. 
+
+disk 자체가 fail되면 새로운 disk가 replace되는 시간이 json으로부터 추가되고 그 시간 이후에 SSD전체가 rebuild 되어야 한다고 디자인 해줘. 그 시간만큼 rebuild bandwidth 유량이 필요한거야. 매 repair, event 마다 rebuild bandwidth나 흐름이 바뀌기 때문에 그때마다 bandwidth를 새로 계산해서 SSD 가 rebuild되는 용량을 조정해야 할거야.  SSD는 rebuild가 완료되면 정상으로 돌아와. rebuild 중인데 read가 필요하면 degraded read가 필요한 것으로 디자인해줘. 
+
+다음은 erasure coding이야 
+erasure coding 은 이전 코드와 달리 3가지로 분류할 거야. inter erasure coding은 내가 잘 graph를 생성하면 erasure coding 하나로 구현이 가능할 듯 하니 따로 분류할 필요까지는 없는 것 같아. 
+
+- erasure coding
+    - 22+2처럼 2가 parity, 22가 실제 유효 데이터
+- LRC
+    - m+k가 22+2로 되어 있고 local_m, local_k가 11+1이면
+        - local_m+local_k 그룹 내에서 1개까지 locally 복구 가능 (즉, 11개 rebuild read 필요)
+        - 2개 이상 죽으면 22+2에서 22개 읽어야 복구 가능
+        - 3개까지 복구 가능 (즉 k+local_k개수만큼 복구 가능)
+        - 유효 용량은 22/(22+2 +2) (11+1에 대한 각각의 parity)가 되겠지
+        - 인풋 받을때 local_m의 배수가 m 인지도 체크해야 겠지
+- multi erasure coding
+    - m+k가 4+2 고 local_m, local_k가 22+2면
+        - 22+2인 stripe을 하나의 chunk로 봐서 다시 4+2 erasure coding을 함
+        - local에서 복구 못하면 그 local stripe이 거대한 fail난 chunk로 간주. 그 거대 fail chunk를 2개까지 허용. 이해했지?
+        - 유효 용량은 4/(4+2)* (22/(22+2)) 가 되겠지?
+- 디스크 그룹 n
+    - 디스크 그룹 n 내에서 m+k가 default로 declustered parity 형태로 존재할거야. 즉, n≥ m+k
+    - LRC도  n 내에 m+k+local_k * (m/local_m)만큼 declustered parity 형태로 존재할거야. 즉, n≥ m+k+local_k * (m/local_m)
+    - multi erasure coding은 n이 두개 존재해 local_n ≥ local_m+local_k 그리고 n ≥ m + k
+    - data loss 율은 너가 알아서 계산할 수 있겠지 그걸 통해서 durability도 계산가능하지 않나? 나중에 필요하면 다시 물어봐
+
+## 기타
+
+IO module 에서 software , hardware failure로 입력할 수 있는건 그대로 유지해줘. 
+
+그리고 disk의 failure rate (Mttf분포)도 단순 exponential과 trace (1 column에 MTTF가 순차적으로 정렬된 형태)를 통해 empirical 하게 입력할 수 있도록 하자. 
+
+성능은 bandwidth만 측정하자 아까 rebuild bandwidth때문에 방해되거나 io/module fail등으로 손실되는 bandwidth를 반영하자.

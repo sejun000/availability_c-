@@ -2,6 +2,8 @@
 
 #include "simulation.hpp"
 #include "graph_structure.hpp"
+#include "disk.hpp"
+#include "erasure_coding.hpp"
 #include <map>
 #include <vector>
 #include <string>
@@ -19,7 +21,7 @@ NodeFailureKey build_node_failure_key(
 
 FailureStateKey build_failure_state_key(
     const std::map<std::string, bool>& failed_nodes_and_enclosures,
-    const std::map<int, FailureInfo>& failure_info_per_ssd_group,
+    const std::map<int, ECGroupFailureInfo>& failure_info_per_ec_group,
     const std::unordered_map<std::string, int>& node_index_map,
     int node_count,
     int total_group_count);
@@ -33,8 +35,8 @@ void calculate_hardware_graph(
     const nlohmann::json& options,
     std::map<NodeFailureKey, GraphStructure>& failed_hardware_graph_table,
     std::map<NodeFailureKey, DisconnectedStatus>& disconnected_table,
-    const SSDIOModuleManager* ssd_io_manager = nullptr,
-    int total_ssds = 0);
+    const DiskIOModuleManager* disk_io_manager = nullptr,
+    int total_disks = 0);
 
 // Initialize simulation
 std::tuple<std::map<std::string, std::string>,
@@ -42,34 +44,9 @@ std::tuple<std::map<std::string, std::string>,
            double>
 initialize_simulation(
     GraphStructure& hardware_graph,
-    double ssd_read_bw,
-    int total_ssd_count,
-    const nlohmann::json& options,
-    double box_mttf,
-    double io_module_mttr);
-
-// Simulation result structure
-struct SimulationResult {
-    double up_time;
-    double cached_up_time;
-    double credit_up_time;
-    double simulation_time;
-    double effective_up_time;
-    std::map<double, double> effective_availabilities;
-    double initial_cost;
-    double total_cost;
-    double time_for_rebuilding;
-    int count_for_rebuilding;
-    double cached_mttf;
-    double mttf;
-    double cached_ssd_repair_cost;
-    double uncached_ssd_repair_cost;
-    double cached_initial_cost;
-    double uncached_initial_cost;
-    double penalty_ratio;
-    double total_mttdl;
-    int total_mttdl_count;
-};
+    double disk_read_bw,
+    int total_disk_count,
+    const nlohmann::json& options);
 
 // Single-core simulation function (from simulation_core.cpp)
 SimulationResult simulation_per_core(
@@ -77,5 +54,15 @@ SimulationResult simulation_per_core(
     const std::map<std::string, nlohmann::json>& params_and_results,
     const GraphStructure& graph_structure_origin,
     int batch_size,
-    const nlohmann::json& options,
-    const std::map<std::string, double>& costs);
+    const nlohmann::json& options);
+
+// Data loss calculation for EC schemes
+double calculate_data_loss_ratio(
+    const ECGroupFailureInfo& failure_info,
+    const ECConfig& ec_config);
+
+// Calculate durability from simulation results
+double calculate_durability(
+    double total_data_loss_ratio,
+    double simulation_time_hours,
+    int simulation_years);

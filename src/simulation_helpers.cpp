@@ -1,48 +1,52 @@
-#include "simulation.hpp"
-#include "utils.hpp"
+#include "simulation_helpers.hpp"
+#include "logger.hpp"
 #include <algorithm>
-#include <unordered_map>
+#include <iostream>
 
+// Build node failure key from current state
 NodeFailureKey build_node_failure_key(
     const std::map<std::string, bool>& failed_nodes_and_enclosures,
     const std::unordered_map<std::string, int>& node_index_map,
     int node_count) {
 
     NodeFailureKey key;
-    key.failed_flags.assign(static_cast<size_t>(node_count), 0);
+    key.failed_flags.resize(node_count, 0);
 
     for (const auto& [node, failed] : failed_nodes_and_enclosures) {
-        auto it = node_index_map.find(node);
-        if (it == node_index_map.end()) continue;
-        key.failed_flags[static_cast<size_t>(it->second)] = failed ? 1 : 0;
+        if (failed) {
+            auto it = node_index_map.find(node);
+            if (it != node_index_map.end()) {
+                key.failed_flags[it->second] = 1;
+            }
+        }
     }
 
     return key;
 }
 
+// Build failure state key from current state
 FailureStateKey build_failure_state_key(
     const std::map<std::string, bool>& failed_nodes_and_enclosures,
-    const std::map<int, FailureInfo>& failure_info_per_ssd_group,
+    const std::map<int, ECGroupFailureInfo>& failure_info_per_ec_group,
     const std::unordered_map<std::string, int>& node_index_map,
     int node_count,
     int total_group_count) {
 
     FailureStateKey key;
     key.node_key = build_node_failure_key(failed_nodes_and_enclosures, node_index_map, node_count);
-    key.failure_counts.assign(static_cast<size_t>(total_group_count), 0);
-    key.network_failure_counts.assign(static_cast<size_t>(total_group_count), 0);
+    key.failure_counts.resize(total_group_count, 0);
 
-    for (const auto& [group_index, failure_info] : failure_info_per_ssd_group) {
-        if (group_index < 0 || group_index >= total_group_count) continue;
-        key.failure_counts[static_cast<size_t>(group_index)] =
-            static_cast<uint8_t>(std::clamp(failure_info.failure_count, 0, 255));
-        key.network_failure_counts[static_cast<size_t>(group_index)] =
-            static_cast<uint8_t>(std::clamp(failure_info.network_failure_count, 0, 255));
+    for (const auto& [group_index, failure_info] : failure_info_per_ec_group) {
+        if (group_index < total_group_count) {
+            key.failure_counts[group_index] = static_cast<uint8_t>(
+                std::min(255, failure_info.get_unavailable_count()));
+        }
     }
 
     return key;
 }
 
+// Calculate hardware graph with failures applied
 void calculate_hardware_graph(
     const GraphStructure& hardware_graph,
     const std::map<std::string, bool>& failed_nodes_and_enclosures,
@@ -51,121 +55,153 @@ void calculate_hardware_graph(
     const nlohmann::json& options,
     std::map<NodeFailureKey, GraphStructure>& failed_hardware_graph_table,
     std::map<NodeFailureKey, DisconnectedStatus>& disconnected_table,
-    const SSDIOModuleManager* ssd_io_manager,
-    int total_ssds) {
+    const DiskIOModuleManager* disk_io_manager,
+    int total_disks) {
 
+    // Check if already computed
     if (failed_hardware_graph_table.find(key) != failed_hardware_graph_table.end()) {
         return;
     }
 
-    GraphStructure hardware_graph_copy = hardware_graph;
+    // Clone the hardware graph
+    GraphStructure graph_copy = hardware_graph.clone();
+    DisconnectedStatus disconnected;
+    disconnected.failed_nodes = failed_nodes_and_enclosures;
 
-    for (const auto& [failed_node_or_enclosure, is_failed] : failed_nodes_and_enclosures) {
-        if (!is_failed) continue;
+    // Disable failed nodes
+    for (const auto& [node, failed] : failed_nodes_and_enclosures) {
+        if (failed) {
+            graph_copy.disable_node(node);
 
-        if (hardware_graph_copy.has_node(failed_node_or_enclosure)) {
-            hardware_graph_copy.remove_node(failed_node_or_enclosure);
-        } else {
-            auto it = enclosure_to_node_map.find(failed_node_or_enclosure);
-            if (it != enclosure_to_node_map.end()) {
-                for (const std::string& node : it->second) {
-                    if (hardware_graph_copy.has_node(node)) {
-                        hardware_graph_copy.remove_node(node);
-                    }
+            // Also disable nodes in enclosures
+            auto encl_it = enclosure_to_node_map.find(node);
+            if (encl_it != enclosure_to_node_map.end()) {
+                for (const auto& enclosed_node : encl_it->second) {
+                    graph_copy.disable_node(enclosed_node);
                 }
             }
         }
     }
 
-    std::string start_module = options["start_module"];
-    std::string end_module = options["end_module"];
-
-    hardware_graph_copy.add_virtual_nodes(start_module, end_module);
-    bool connected = hardware_graph_copy.has_path("virtual_source", "virtual_sink");
-    hardware_graph_copy.remove_virtual_nodes();
-
-    DisconnectedStatus disconnected;
-    disconnected.local_module = !connected;
-    disconnected.common_module = false;
-
-    // Calculate per-SSD disconnected status based on io_module failures
-    if (ssd_io_manager != nullptr && total_ssds > 0) {
-        for (int ssd_idx = 0; ssd_idx < total_ssds; ++ssd_idx) {
-            disconnected.ssd_disconnected[ssd_idx] =
-                ssd_io_manager->is_ssd_disconnected(ssd_idx, failed_nodes_and_enclosures);
+    // Update disk disconnection status
+    if (disk_io_manager != nullptr) {
+        for (int disk_idx = 0; disk_idx < total_disks; ++disk_idx) {
+            bool is_disconnected = disk_io_manager->is_disk_disconnected(disk_idx, failed_nodes_and_enclosures);
+            disconnected.set_disk_disconnected(disk_idx, is_disconnected);
         }
     }
 
+    failed_hardware_graph_table[key] = graph_copy;
     disconnected_table[key] = disconnected;
-    failed_hardware_graph_table[key] = hardware_graph_copy;
 }
 
+// Initialize simulation
 std::tuple<std::map<std::string, std::string>,
            std::map<std::string, std::vector<std::string>>,
            double>
 initialize_simulation(
     GraphStructure& hardware_graph,
-    double ssd_read_bw,
-    int total_ssd_count,
-    const nlohmann::json& options,
-    double box_mttf,
-    double io_module_mttr) {
+    double disk_read_bw,
+    int total_disk_count,
+    const nlohmann::json& options) {
 
     std::map<std::string, std::string> node_to_module_map;
     std::map<std::string, std::vector<std::string>> enclosure_to_node_map;
 
-    for (const auto& [enclosure, nodes] : hardware_graph.enclosures_) {
-        for (const auto& [module, mttf] : hardware_graph.mttfs_) {
-            if (enclosure.find(module) != std::string::npos) {
-                node_to_module_map[enclosure] = module;
-                if (box_mttf > 0) {
-                    hardware_graph.mttfs_[module] = box_mttf;
-                }
-                break;
-            }
-        }
-        enclosure_to_node_map[enclosure] = nodes;
-    }
-
-    for (const std::string& node : hardware_graph.get_nodes()) {
-        for (const auto& [module, mttf] : hardware_graph.mttfs_) {
-            if (node.find(module) != std::string::npos) {
-                if (node.find("io_module") != std::string::npos ||
-                    node.find("backend_module") != std::string::npos ||
-                    node.find("host_module") != std::string::npos) {
-                    double origin_mtr = hardware_graph.mtrs_[module];
-                    if (io_module_mttr > origin_mtr) {
-                        hardware_graph.mtrs_[module] = io_module_mttr;
-                    }
-                }
-                node_to_module_map[node] = module;
-                break;
-            }
-        }
-    }
-
-    GraphStructure hardware_graph_copy = hardware_graph;
     std::string start_module = options["start_module"];
     std::string end_module = options["end_module"];
-    std::string lowest_common_module = options["lowest_common_module"];
 
-    // Build parent map for LCA calculation (used for rebuild bandwidth calculation)
+    // Build node to module map
+    for (const auto& node : hardware_graph.nodes_) {
+        // Extract module name (prefix before underscore or number)
+        size_t pos = node.find_first_of("0123456789");
+        if (pos != std::string::npos && pos > 0) {
+            // Remove trailing underscore if present
+            std::string module = node.substr(0, pos);
+            if (!module.empty() && module.back() == '_') {
+                module.pop_back();
+            }
+            node_to_module_map[node] = module;
+        } else {
+            node_to_module_map[node] = node;
+        }
+    }
+
+    // Build enclosure to node map
+    for (const auto& [enclosure, nodes] : hardware_graph.enclosures_) {
+        enclosure_to_node_map[enclosure] = nodes;
+
+        // Add enclosure to node_to_module_map
+        size_t pos = enclosure.find_first_of("0123456789");
+        if (pos != std::string::npos && pos > 0) {
+            std::string module = enclosure.substr(0, pos);
+            if (!module.empty() && module.back() == '_') {
+                module.pop_back();
+            }
+            node_to_module_map[enclosure] = module;
+        } else {
+            node_to_module_map[enclosure] = enclosure;
+        }
+    }
+
+    // Build parent map for LCA calculation
     hardware_graph.build_parent_map(start_module);
 
-    hardware_graph_copy.add_virtual_nodes(start_module, end_module);
-    double max_flow_hardware = hardware_graph_copy.maximum_flow("virtual_source", "virtual_sink");
+    // Calculate max flow without any failure
+    GraphStructure hardware_graph_copy = hardware_graph.clone();
+    hardware_graph_copy.add_virtual_nodes(start_module, end_module, FlowDirection::UPSTREAM);
+    double max_flow_hardware = hardware_graph_copy.maximum_flow("virtual_source", "virtual_sink", FlowDirection::UPSTREAM);
     hardware_graph_copy.remove_virtual_nodes();
 
-    hardware_graph_copy.add_virtual_nodes(start_module, lowest_common_module);
-    double common_module_max_flow = hardware_graph_copy.maximum_flow("virtual_source", "virtual_sink");
-    hardware_graph_copy.remove_virtual_nodes();
+    Logger::getInstance().info("Max flow without failure: " + std::to_string(max_flow_hardware / 1e9) + " GB/s");
 
-    double ssd_max_read_performance = std::min(max_flow_hardware, total_ssd_count * ssd_read_bw);
-    int network_nodes = options["network_nodes"];
-    ssd_max_read_performance = std::min(ssd_max_read_performance, common_module_max_flow / network_nodes);
+    return {node_to_module_map, enclosure_to_node_map, max_flow_hardware};
+}
 
-    double dram_bandwidth = get_dram_bandwidth(options);
-    ssd_max_read_performance = std::min(ssd_max_read_performance, dram_bandwidth);
+// Calculate data loss ratio for EC schemes
+double calculate_data_loss_ratio(
+    const ECGroupFailureInfo& failure_info,
+    const ECConfig& ec_config) {
 
-    return {node_to_module_map, enclosure_to_node_map, ssd_max_read_performance};
+    int unavailable = failure_info.get_unavailable_count();
+
+    if (unavailable <= ec_config.k) {
+        return 0.0;  // Can recover
+    }
+
+    // Data loss: fraction of group's data that is lost
+    // In declustered parity, each disk holds 1/n of data
+    // With k+x failures (x > 0), we lose approximately x/n of data
+    int excess_failures = unavailable - ec_config.k;
+    int group_size = ec_config.n > 0 ? ec_config.n : (ec_config.m + ec_config.k);
+
+    return static_cast<double>(excess_failures) / group_size;
+}
+
+// Calculate durability from simulation results
+double calculate_durability(
+    double total_data_loss_ratio,
+    double simulation_time_hours,
+    int simulation_years) {
+
+    if (simulation_time_hours <= 0 || simulation_years <= 0) {
+        return 1.0;
+    }
+
+    double hours_per_year = 365.0 * 24.0;
+    double expected_years = simulation_time_hours / hours_per_year;
+
+    if (expected_years <= 0) {
+        return 1.0;
+    }
+
+    // Durability = 1 - (data loss ratio per year)
+    double data_loss_per_year = total_data_loss_ratio / expected_years;
+
+    // Clamp to valid range
+    if (data_loss_per_year >= 1.0) {
+        return 0.0;
+    }
+
+    return 1.0 - data_loss_per_year;
 }

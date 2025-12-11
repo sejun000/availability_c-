@@ -1,0 +1,54 @@
+{
+    "options":
+    {
+        "start_module": "switch",
+        "end_module": "io_module",
+        "lowest_common_module": "switch",
+        "highest_local_module": "io_module",
+        "prep_time_for_rebuilding": 4,
+        "rebuild_bw_ratio": 0.2,
+        "simulation_years": 10,
+        "avail_file": "availability.txt",
+        "tlc_dwpd_limit": 1,
+        "qlc_dwpd_limit": 0.26,
+        "tlc_write_bw": "4G",
+        "qlc_write_bw": "4G",
+        "tlc_read_bw": "7G",
+        "qlc_read_bw": "7G",
+        "dram_bandwidth": "400.6G",
+        "nic_to_ssd_direct": true,
+        "tlc_cost_per_gb": 0.2,
+        "qlc_cost_per_gb": 0.1,
+        "network_nodes" : 8,
+        "erasure_coding_cores": 4,
+        "ssd_arr": 0.0327
+    },
+    "edges": [
+        {"start": "switch0", "end": "io_module0", "bandwidth": "12.5G"},
+        {"start": "switch0", "end": "io_module1", "bandwidth": "12.5G"},
+        {"start": "switch1", "end": "io_module0", "bandwidth": "12.5G"},
+        {"start": "switch1", "end": "io_module1", "bandwidth": "12.5G"}
+    ],
+    "enclosures": {
+        "NVMeEnclosure0": ["io_module0", "io_module1"]
+    },
+    "mttf": {
+        "switch": 211310,
+        "io_module": 500,
+        "ssd": 0,
+        "NVMeEnclosure": 416666666
+    },
+    "cost": {
+        "switch": 21753,
+        "io_module": 4938,
+        "ssd": 0,
+        "NVMeEnclosure": 1166,
+        "ControllerBox": 1166
+    },
+    "mtr": {
+        "switch": 4,
+        "io_module": 0.25,
+        "ssd": 4,
+        "NVMeEnclosure": 2
+    }
+}
