@@ -95,6 +95,7 @@ struct FlowsAndSpeedEntry {
     double write_bandwidth = 0.0;             // Available write bandwidth
     double availability_ratio = 1.0;          // Current availability (0 if data loss)
     double data_loss_ratio = 0.0;             // Fraction of data lost
+    double performance_ratio = 1.0;           // read_bw / max_read_bw (for perf availability)
 
     FlowsAndSpeedEntry() = default;
 };
@@ -106,6 +107,10 @@ struct NodeFailureKey {
     bool operator<(const NodeFailureKey& other) const {
         return failed_flags < other.failed_flags;
     }
+
+    bool operator==(const NodeFailureKey& other) const {
+        return failed_flags == other.failed_flags;
+    }
 };
 
 struct FailureStateKey {
@@ -116,6 +121,31 @@ struct FailureStateKey {
         if (node_key < other.node_key) return true;
         if (other.node_key < node_key) return false;
         return failure_counts < other.failure_counts;
+    }
+
+    bool operator==(const FailureStateKey& other) const {
+        return node_key == other.node_key && failure_counts == other.failure_counts;
+    }
+};
+
+// Hash functions for unordered_map
+struct NodeFailureKeyHash {
+    size_t operator()(const NodeFailureKey& key) const {
+        size_t hash = 0;
+        for (uint8_t flag : key.failed_flags) {
+            hash ^= std::hash<uint8_t>{}(flag) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        }
+        return hash;
+    }
+};
+
+struct FailureStateKeyHash {
+    size_t operator()(const FailureStateKey& key) const {
+        size_t hash = NodeFailureKeyHash{}(key.node_key);
+        for (uint8_t count : key.failure_counts) {
+            hash ^= std::hash<uint8_t>{}(count) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        }
+        return hash;
     }
 };
 
@@ -136,6 +166,9 @@ struct SimulationParams {
     double rebuild_bw_ratio = 0.2;   // Fraction of bandwidth used for rebuild
     double degraded_ratio = 0.2;     // Fraction of bandwidth for degraded read
 
+    // Performance availability threshold
+    double target_performance_ratio = 0.0;  // If > 0, calculate perf_availability
+
     // Simulation control
     int nprocs = 40;
     int simulation_years = 10;
@@ -149,6 +182,8 @@ struct SimulationResult {
     double up_time = 0.0;
     double simulation_time = 0.0;
     double availability = 0.0;
+    double perf_up_time = 0.0;              // Time with performance >= target
+    double perf_availability = 0.0;         // Availability based on performance threshold
     double mttdl = 0.0;                     // Mean time to data loss
     int data_loss_events = 0;               // Number of data loss events
     double total_data_loss_ratio = 0.0;     // Total fraction of data lost
@@ -215,7 +250,7 @@ void calculate_flows_and_speed(
     const std::map<int, ECGroupFailureInfo>& failure_info_per_ec_group,
     const ErasureCodingScheme& ec_scheme,
     const SimulationParams& params,
-    std::map<FailureStateKey, FlowsAndSpeedEntry>& flows_and_speed_table,
+    std::unordered_map<FailureStateKey, FlowsAndSpeedEntry, FailureStateKeyHash>& flows_and_speed_table,
     double max_read_performance_without_any_failure,
     const DisconnectedStatus& disconnected,
     const FailureStateKey& key,

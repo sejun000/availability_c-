@@ -245,7 +245,7 @@ void calculate_flows_and_speed(
     const std::map<int, ECGroupFailureInfo>& failure_info_per_ec_group,
     const ErasureCodingScheme& ec_scheme,
     const SimulationParams& params,
-    std::map<FailureStateKey, FlowsAndSpeedEntry>& flows_and_speed_table,
+    std::unordered_map<FailureStateKey, FlowsAndSpeedEntry, FailureStateKeyHash>& flows_and_speed_table,
     double max_read_performance_without_any_failure,
     const DisconnectedStatus& disconnected,
     const FailureStateKey& key,
@@ -297,28 +297,76 @@ void calculate_flows_and_speed(
             state = DISK_STATE_REBUILDING;
         }
 
-        if (state == DISK_STATE_REBUILDING) {
+        // Calculate rebuild bandwidth for any group with failures (REBUILDING or DATA_LOSS)
+        if (effective_failure_count > 0) {
             int degraded_disks = group_size - effective_failure_count;
             if (degraded_disks < 0) degraded_disks = 0;
 
-            // Calculate rebuild bandwidth
-            std::vector<double> bws = {params.disk_read_bw, params.disk_write_bw};
+            // Calculate effective disk bandwidth considering port failures (dual-port SSD)
+            double effective_read_bw = params.disk_read_bw;
+            double effective_write_bw = params.disk_write_bw;
 
-            // Check if EC group crosses io_module boundary
-            if (disk_io_manager != nullptr && !disk_io_manager->is_legacy_mode()) {
-                bool crosses_boundary = disk_io_manager->does_ec_group_cross_io_module(start_disk_idx, group_size);
+            if (disk_io_manager != nullptr) {
+                // Find minimum port ratio among source disks in this group
+                double min_port_ratio = 1.0;
+                for (int di = start_disk_idx; di < start_disk_idx + group_size; ++di) {
+                    if (all_unavailable.find(di) == all_unavailable.end()) {
+                        // This disk is a potential source for rebuild
+                        double ratio = disk_io_manager->get_active_port_ratio(di, disconnected.failed_nodes);
+                        if (ratio < min_port_ratio && ratio > 0) {
+                            min_port_ratio = ratio;
+                        }
+                    }
+                }
+                effective_read_bw *= min_port_ratio;
+                effective_write_bw *= min_port_ratio;
+            }
 
-                if (crosses_boundary) {
-                    std::set<std::string> ec_group_io_modules =
-                        disk_io_manager->get_io_modules_for_ec_group(start_disk_idx, group_size);
-                    std::vector<std::string> source_modules(ec_group_io_modules.begin(), ec_group_io_modules.end());
-                    std::string target_module = *ec_group_io_modules.begin();
+            // Calculate rebuild bandwidth: min of (read BW * ratio, write BW * ratio, EC encoding speed)
+            std::vector<double> bws = {effective_read_bw, effective_write_bw};
 
-                    double lca_max_flow = hardware_graph_copy.calculate_rebuild_max_flow_via_io_modules(
-                        source_modules, target_module);
+            if (state == DISK_STATE_DATA_LOSS) {
+                // DATA_LOSS: Rebuild from backup store via network (root -> switch -> io_module)
+                // Network bandwidth becomes the bottleneck
+                double network_bw = hardware_graph_copy.calculate_max_flow_from_root();
+                // Share network bandwidth among all groups needing recovery
+                int groups_with_data_loss = 0;
+                for (int gi = 0; gi < num_ec_groups; ++gi) {
+                    int gi_start = ec_scheme.get_group_start_disk(gi);
+                    std::set<int> gi_unavailable;
+                    auto gi_it = failure_info_per_ec_group.find(gi);
+                    if (gi_it != failure_info_per_ec_group.end()) {
+                        gi_unavailable = gi_it->second.failed_disk_indices;
+                    }
+                    for (int di = gi_start; di < gi_start + group_size; ++di) {
+                        if (disconnected.is_disk_disconnected(di)) {
+                            gi_unavailable.insert(di);
+                        }
+                    }
+                    if (static_cast<int>(gi_unavailable.size()) > ec_config.k) {
+                        groups_with_data_loss++;
+                    }
+                }
+                double network_bw_per_group = network_bw / std::max(1, groups_with_data_loss);
+                bws.push_back(network_bw_per_group);
+            } else {
+                // REBUILDING: Normal rebuild from other disks in EC group
+                // Check if EC group crosses io_module boundary
+                if (disk_io_manager != nullptr && !disk_io_manager->is_legacy_mode()) {
+                    bool crosses_boundary = disk_io_manager->does_ec_group_cross_io_module(start_disk_idx, group_size);
 
-                    double lca_bw_per_group = lca_max_flow / std::max(1, static_cast<int>(failure_info_per_ec_group.size()));
-                    bws.push_back(lca_bw_per_group);
+                    if (crosses_boundary) {
+                        std::set<std::string> ec_group_io_modules =
+                            disk_io_manager->get_io_modules_for_ec_group(start_disk_idx, group_size);
+                        std::vector<std::string> source_modules(ec_group_io_modules.begin(), ec_group_io_modules.end());
+                        std::string target_module = *ec_group_io_modules.begin();
+
+                        double lca_max_flow = hardware_graph_copy.calculate_rebuild_max_flow_via_io_modules(
+                            source_modules, target_module);
+
+                        double lca_bw_per_group = lca_max_flow / std::max(1, static_cast<int>(failure_info_per_ec_group.size()));
+                        bws.push_back(lca_bw_per_group);
+                    }
                 }
             }
 
@@ -328,29 +376,73 @@ void calculate_flows_and_speed(
 
             entry.rebuild_bandwidth[effective_failure_count] = rebuild_bw;
         }
-        else if (state == DISK_STATE_DATA_LOSS) {
+
+        if (state == DISK_STATE_DATA_LOSS) {
             // Calculate data loss ratio for this group
             double data_loss = ec_scheme.get_data_loss_ratio(all_unavailable);
             total_data_loss += data_loss / total_groups;
         }
     }
 
-    // Calculate available read/write bandwidth
-    // Count available disks
-    int available_disks = 0;
+    // Calculate available read/write bandwidth considering:
+    // 1. Port failures (dual-port SSD bandwidth reduction)
+    // 2. Rebuild bandwidth consumption
+    double total_read_bw = 0.0;
+    double total_write_bw = 0.0;
+    double total_rebuild_bw_consumed = 0.0;
+
     for (int i = 0; i < params.total_disks; ++i) {
-        if (!disconnected.is_disk_disconnected(i)) {
-            int group_idx = ec_scheme.get_disk_group(i);
-            auto it = failure_info_per_ec_group.find(group_idx);
-            if (it == failure_info_per_ec_group.end() ||
-                it->second.failed_disk_indices.find(i) == it->second.failed_disk_indices.end()) {
-                available_disks++;
-            }
+        if (disconnected.is_disk_disconnected(i)) {
+            continue;  // Disk completely disconnected
         }
+
+        int group_idx = ec_scheme.get_disk_group(i);
+        auto it = failure_info_per_ec_group.find(group_idx);
+        if (it != failure_info_per_ec_group.end() &&
+            it->second.failed_disk_indices.find(i) != it->second.failed_disk_indices.end()) {
+            continue;  // Disk itself has failed
+        }
+
+        // Calculate effective bandwidth with port ratio
+        double port_ratio = 1.0;
+        if (disk_io_manager != nullptr) {
+            port_ratio = disk_io_manager->get_active_port_ratio(i, disconnected.failed_nodes);
+        }
+
+        double disk_read_bw = params.disk_read_bw * port_ratio;
+        double disk_write_bw = params.disk_write_bw * port_ratio;
+
+        total_read_bw += disk_read_bw;
+        total_write_bw += disk_write_bw;
     }
 
-    entry.read_bandwidth = params.disk_read_bw * available_disks;
-    entry.write_bandwidth = params.disk_write_bw * available_disks;
+    // Calculate total rebuild bandwidth being consumed
+    for (const auto& [failure_count, rebuild_bw] : entry.rebuild_bandwidth) {
+        // Count how many groups have this failure count
+        int groups_with_this_failure = 0;
+        for (int gi = 0; gi < num_ec_groups; ++gi) {
+            int gi_start = ec_scheme.get_group_start_disk(gi);
+            std::set<int> gi_unavailable;
+            auto gi_it = failure_info_per_ec_group.find(gi);
+            if (gi_it != failure_info_per_ec_group.end()) {
+                gi_unavailable = gi_it->second.failed_disk_indices;
+            }
+            for (int di = gi_start; di < gi_start + group_size; ++di) {
+                if (disconnected.is_disk_disconnected(di)) {
+                    gi_unavailable.insert(di);
+                }
+            }
+            if (static_cast<int>(gi_unavailable.size()) == failure_count) {
+                groups_with_this_failure++;
+            }
+        }
+        // Each rebuilding group consumes rebuild_bw from the source disks
+        total_rebuild_bw_consumed += rebuild_bw * groups_with_this_failure;
+    }
+
+    // Host IO = total disk BW - rebuild BW consumed
+    entry.read_bandwidth = std::max(0.0, total_read_bw - total_rebuild_bw_consumed);
+    entry.write_bandwidth = std::max(0.0, total_write_bw - total_rebuild_bw_consumed);
     entry.data_loss_ratio = total_data_loss;
 
     // Availability: 1.0 if no EC group has more than k failures (can still read)
@@ -358,24 +450,93 @@ void calculate_flows_and_speed(
     // Availability drops to 0 only when we can't serve any reads
     // For now, availability = 1 - (fraction of groups with data loss)
     int groups_with_loss = 0;
+    int total_failed_disks = 0;
+    int total_disconnected_disks = 0;
+
     for (int group_index = 0; group_index < num_ec_groups; ++group_index) {
         int start_disk_idx = ec_scheme.get_group_start_disk(group_index);
         std::set<int> unavailable_in_group;
+        int failed_in_group = 0;
+        int disconnected_in_group = 0;
+
         auto fi = failure_info_per_ec_group.find(group_index);
         if (fi != failure_info_per_ec_group.end()) {
             unavailable_in_group = fi->second.failed_disk_indices;
+            failed_in_group = static_cast<int>(fi->second.failed_disk_indices.size());
         }
         for (int i = start_disk_idx; i < start_disk_idx + group_size; ++i) {
             if (disconnected.is_disk_disconnected(i)) {
                 unavailable_in_group.insert(i);
+                disconnected_in_group++;
             }
         }
+
+        total_failed_disks += failed_in_group;
+        total_disconnected_disks += disconnected_in_group;
+
         if (static_cast<int>(unavailable_in_group.size()) > ec_config.k) {
             groups_with_loss++;
         }
     }
-    // Availability = fraction of groups that are still readable
-    entry.availability_ratio = 1.0 - static_cast<double>(groups_with_loss) / num_ec_groups;
+
+    // Debug logging for unavailability
+    if (groups_with_loss > 0) {
+        // Count failed nodes
+        int failed_io_modules = 0;
+        int failed_switches = 0;
+        int failed_enclosures = 0;
+        for (const auto& [node, failed] : disconnected.failed_nodes) {
+            if (failed) {
+                if (node.find("io_module") != std::string::npos) {
+                    failed_io_modules++;
+                } else if (node.find("switch") != std::string::npos) {
+                    failed_switches++;
+                } else if (node.find("Enclosure") != std::string::npos) {
+                    failed_enclosures++;
+                }
+            }
+        }
+
+        Logger::getInstance().info(
+            "UNAVAIL: groups_with_loss=" + std::to_string(groups_with_loss) +
+            "/" + std::to_string(num_ec_groups) +
+            ", failed_disks=" + std::to_string(total_failed_disks) +
+            ", disconnected_disks=" + std::to_string(total_disconnected_disks) +
+            ", failed_io_modules=" + std::to_string(failed_io_modules) +
+            ", failed_switches=" + std::to_string(failed_switches) +
+            ", failed_enclosures=" + std::to_string(failed_enclosures));
+    }
+
+    // Availability = fraction of groups that are still readable (not data_loss)
+    int available_groups = num_ec_groups - groups_with_loss;
+    entry.availability_ratio = static_cast<double>(available_groups) / num_ec_groups;
+
+    // Performance ratio = fraction of groups with full performance (no failures at all)
+    // A group has full performance if it has 0 unavailable disks (no failed, no disconnected)
+    int groups_with_full_perf = 0;
+    for (int group_index = 0; group_index < num_ec_groups; ++group_index) {
+        int start_disk_idx = ec_scheme.get_group_start_disk(group_index);
+        int unavailable_count = 0;
+
+        auto fi = failure_info_per_ec_group.find(group_index);
+        if (fi != failure_info_per_ec_group.end()) {
+            unavailable_count += static_cast<int>(fi->second.failed_disk_indices.size());
+        }
+        for (int i = start_disk_idx; i < start_disk_idx + group_size; ++i) {
+            if (disconnected.is_disk_disconnected(i)) {
+                // Only count if not already counted as failed
+                if (fi == failure_info_per_ec_group.end() ||
+                    fi->second.failed_disk_indices.find(i) == fi->second.failed_disk_indices.end()) {
+                    unavailable_count++;
+                }
+            }
+        }
+
+        if (unavailable_count == 0) {
+            groups_with_full_perf++;
+        }
+    }
+    entry.performance_ratio = static_cast<double>(groups_with_full_perf) / num_ec_groups;
 
     flows_and_speed_table[key] = entry;
 }
@@ -645,6 +806,7 @@ void monte_carlo_simulation(
     double total_data_loss_ratio = 0.0;
     double total_read_bw = 0.0;
     double total_write_bw = 0.0;
+    double total_perf_up_time = 0.0;
 
     for (auto& future : futures) {
         SimulationResult result = future.get();
@@ -658,6 +820,7 @@ void monte_carlo_simulation(
         total_data_loss_ratio += result.total_data_loss_ratio;
         total_read_bw += result.average_read_bandwidth;
         total_write_bw += result.average_write_bandwidth;
+        total_perf_up_time += result.perf_up_time;
     }
 
     Logger::getInstance().info("All simulation threads completed, aggregating results");
@@ -694,6 +857,15 @@ void monte_carlo_simulation(
 
     params_and_results["avg_read_bandwidth"] = total_read_bw / nprocs;
     params_and_results["avg_write_bandwidth"] = total_write_bw / nprocs;
+
+    // Performance availability (if target_performance_ratio specified)
+    double target_perf_ratio = options.value("target_performance_ratio", 0.0);
+    if (target_perf_ratio > 0) {
+        double avg_perf_up_time = total_perf_up_time / nprocs;
+        double perf_availability = avg_perf_up_time / avg_simulation_time;
+        params_and_results["perf_availability"] = perf_availability;
+        params_and_results["perf_avail_nines"] = Utils::get_nines(perf_availability);
+    }
 
     Logger::getInstance().info("Simulation completed");
     Logger::getInstance().info("Availability: " + std::to_string(availability) +

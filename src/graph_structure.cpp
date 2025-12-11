@@ -615,6 +615,61 @@ double GraphStructure::calculate_rebuild_max_flow_via_io_modules(
     return flow;
 }
 
+double GraphStructure::calculate_max_flow_from_root() {
+    // Find root node (usually "root" or node with no incoming edges from non-disk nodes)
+    std::string root_node;
+    if (nodes_.count("root") > 0) {
+        root_node = "root";
+    } else {
+        // Find the node that appears only as source in edges (likely root)
+        for (const auto& node : nodes_) {
+            if (node.find("io_module") == std::string::npos &&
+                node.find("disk") == std::string::npos &&
+                node.find("virtual") == std::string::npos) {
+                // Check if this node has outgoing edges but minimal incoming
+                bool has_outgoing = adjacency_list_.count(node) > 0 && !adjacency_list_.at(node).empty();
+                if (has_outgoing) {
+                    root_node = node;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (root_node.empty()) {
+        return MAX_EDGE_VALUE;  // No root found, assume unlimited
+    }
+
+    // Collect all io_modules
+    std::vector<std::string> io_modules;
+    for (const auto& node : nodes_) {
+        if (node.find("io_module") != std::string::npos) {
+            io_modules.push_back(node);
+        }
+    }
+
+    if (io_modules.empty()) {
+        return MAX_EDGE_VALUE;
+    }
+
+    // Add virtual sink connected from all io_modules
+    nodes_.insert("backup_virtual_sink");
+    for (const auto& io_mod : io_modules) {
+        adjacency_list_[io_mod]["backup_virtual_sink"] = {MAX_EDGE_VALUE, MAX_EDGE_VALUE};
+    }
+
+    // Calculate max flow from root to virtual sink
+    double flow = maximum_flow(root_node, "backup_virtual_sink", FlowDirection::DOWNSTREAM);
+
+    // Clean up
+    nodes_.erase("backup_virtual_sink");
+    for (auto& [node, neighbors] : adjacency_list_) {
+        neighbors.erase("backup_virtual_sink");
+    }
+
+    return flow;
+}
+
 double GraphStructure::get_edge_capacity(const std::string& from, const std::string& to,
                                           FlowDirection direction) const {
     auto it = adjacency_list_.find(from);

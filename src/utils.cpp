@@ -491,11 +491,33 @@ void Utils::write_results_to_csv(
         }
         file.close();
 
-        // Validate that all keys exist in header
+        // Check if headers match - if not, recreate file with new header
+        bool headers_match = true;
         for (const auto& [key, value] : filtered_results) {
             if (std::find(header.begin(), header.end(), key) == header.end()) {
-                Logger::getInstance().error("CSV header missing expected field: " + key);
-                throw std::runtime_error("CSV header missing expected field: " + key);
+                headers_match = false;
+                Logger::getInstance().info("CSV header missing field: " + key + ", recreating file");
+                break;
+            }
+        }
+
+        if (!headers_match) {
+            // Recreate file with new header
+            header.clear();
+            for (const auto& [key, value] : filtered_results) {
+                header.push_back(key);
+            }
+
+            std::ofstream new_file(output_file);
+            if (new_file.is_open()) {
+                for (size_t i = 0; i < header.size(); ++i) {
+                    new_file << header[i];
+                    if (i < header.size() - 1) {
+                        new_file << ",";
+                    }
+                }
+                new_file << "\n";
+                new_file.close();
             }
         }
     }

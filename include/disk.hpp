@@ -103,6 +103,15 @@ public:
     // Get total disk count
     int get_total_disks() const { return total_disks_; }
 
+    // Get active port ratio for a disk (considering failed io_modules)
+    // Returns (active_ports / total_ports), e.g., 0.5 if 1 of 2 ports failed
+    double get_active_port_ratio(int disk_index,
+                                  const std::map<std::string, bool>& failed_nodes) const;
+
+    // Get effective bandwidth for a disk considering port failures
+    double get_effective_bandwidth(int disk_index, double full_bandwidth,
+                                    const std::map<std::string, bool>& failed_nodes) const;
+
 private:
     std::vector<DiskIOModuleMapping> mappings_;
     std::set<std::string> all_io_modules_;

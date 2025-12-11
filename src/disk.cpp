@@ -188,3 +188,38 @@ std::set<std::string> DiskIOModuleManager::get_io_modules_for_ec_group(
     }
     return result;
 }
+
+double DiskIOModuleManager::get_active_port_ratio(
+    int disk_index,
+    const std::map<std::string, bool>& failed_nodes) const {
+
+    std::vector<std::string> io_modules = get_io_modules_for_disk(disk_index);
+
+    if (io_modules.empty()) {
+        return 0.0;  // No ports = no bandwidth
+    }
+
+    int total_ports = static_cast<int>(io_modules.size());
+    int active_ports = 0;
+
+    for (const auto& io_mod : io_modules) {
+        auto it = failed_nodes.find(io_mod);
+        if (it == failed_nodes.end() || !it->second) {
+            active_ports++;  // This io_module is up
+        }
+    }
+
+    if (active_ports == 0) {
+        return 0.0;  // All ports down = disconnected
+    }
+
+    return static_cast<double>(active_ports) / static_cast<double>(total_ports);
+}
+
+double DiskIOModuleManager::get_effective_bandwidth(
+    int disk_index, double full_bandwidth,
+    const std::map<std::string, bool>& failed_nodes) const {
+
+    double port_ratio = get_active_port_ratio(disk_index, failed_nodes);
+    return full_bandwidth * port_ratio;
+}

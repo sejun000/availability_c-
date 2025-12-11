@@ -29,6 +29,9 @@ struct Arguments {
     int nprocs = 40;
     double rebuild_bw_ratio = 0.2;
     double degraded_ratio = 0.2;
+    double target_performance_ratio = 0.0;  // 0 = disabled
+    int num_simulations = 400000;  // Number of Monte Carlo iterations
+    int simulation_years = 10;     // Virtual years per simulation
     bool no_result = false;
     bool verbose = false;
 };
@@ -54,6 +57,9 @@ void print_usage() {
     std::cerr << "  --nprocs <int>            Number of parallel processes (default: 40)" << std::endl;
     std::cerr << "  --rebuild_bw_ratio <double> Rebuild bandwidth ratio (default: 0.2)" << std::endl;
     std::cerr << "  --degraded_ratio <double>  Degraded read ratio (default: 0.2)" << std::endl;
+    std::cerr << "  --target_perf <double>    Target performance ratio for perf_availability (default: 0)" << std::endl;
+    std::cerr << "  --num_sim <int>           Number of Monte Carlo iterations (default: 200000)" << std::endl;
+    std::cerr << "  --sim_years <int>         Virtual years per simulation (default: 10)" << std::endl;
     std::cerr << "  --no_result               Don't write results to file" << std::endl;
     std::cerr << "  --verbose                 Enable verbose logging" << std::endl;
     std::cerr << std::endl;
@@ -88,6 +94,9 @@ Arguments parse_arguments(int argc, char* argv[]) {
         else if (arg == "--nprocs" && i + 1 < argc) args.nprocs = std::stoi(argv[++i]);
         else if (arg == "--rebuild_bw_ratio" && i + 1 < argc) args.rebuild_bw_ratio = std::stod(argv[++i]);
         else if (arg == "--degraded_ratio" && i + 1 < argc) args.degraded_ratio = std::stod(argv[++i]);
+        else if (arg == "--target_perf" && i + 1 < argc) args.target_performance_ratio = std::stod(argv[++i]);
+        else if (arg == "--num_sim" && i + 1 < argc) args.num_simulations = std::stoi(argv[++i]);
+        else if (arg == "--sim_years" && i + 1 < argc) args.simulation_years = std::stoi(argv[++i]);
         else if (arg == "--no_result") args.no_result = true;
         else if (arg == "--verbose") args.verbose = true;
         else if (arg[0] != '-') {
@@ -170,6 +179,18 @@ int main(int argc, char* argv[]) {
     std::cout << "  Disk capacity: " << args.capacity / 1e12 << " TB" << std::endl;
     std::cout << "  Disk read BW: " << read_bw / 1e9 << " GB/s" << std::endl;
     std::cout << "  Disk write BW: " << write_bw / 1e9 << " GB/s" << std::endl;
+    double disk_mttf_hours = args.guaranteed_years * 365.0 * 24.0 * dwpd_limit / args.dwpd;
+    std::cout << "  Disk MTTF: " << disk_mttf_hours / (365.0 * 24.0) << " years (" << disk_mttf_hours << " hours)" << std::endl;
+
+    // Calculate and show EC encoding speed (256KB chunk)
+    const double EC_CHUNK_SIZE = 256.0 * 1024.0;
+    double ec_latency_sec = Utils::get_encoding_latency_sec(args.m, args.k);
+    double ec_encoding_speed = 0;
+    if (ec_latency_sec > 0) {
+        ec_encoding_speed = EC_CHUNK_SIZE / ec_latency_sec;
+        std::cout << "  EC encoding latency: " << ec_latency_sec * 1e6 << " usec/256KB chunk" << std::endl;
+        std::cout << "  EC encoding speed: " << ec_encoding_speed / 1e6 << " MB/s" << std::endl;
+    }
     std::cout << "  Rebuild BW ratio: " << args.rebuild_bw_ratio << std::endl;
     std::cout << "  Degraded ratio: " << args.degraded_ratio << std::endl;
 
@@ -196,6 +217,8 @@ int main(int argc, char* argv[]) {
     options["local_n"] = args.local_n;
     options["rebuild_bw_ratio"] = args.rebuild_bw_ratio;
     options["degraded_ratio"] = args.degraded_ratio;
+    options["target_performance_ratio"] = args.target_performance_ratio;
+    options["simulation_years"] = args.simulation_years;
 
     // Set disk failure trace file (CLI overrides JSON config)
     if (!args.disk_failure_trace.empty()) {
@@ -203,8 +226,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Run simulation
-    int num_simulations = 80000;
-    monte_carlo_simulation(params_and_results, hardware_graph, num_simulations, options);
+    monte_carlo_simulation(params_and_results, hardware_graph, args.num_simulations, options);
 
     // Output results
     std::cout << "\n========================================" << std::endl;
@@ -226,6 +248,13 @@ int main(int argc, char* argv[]) {
 
     if (params_and_results.find("avg_rebuilding_time") != params_and_results.end()) {
         std::cout << "  Avg rebuild time: " << params_and_results["avg_rebuilding_time"].get<double>() << " hours" << std::endl;
+    }
+
+    // Performance availability (if target_perf specified)
+    if (args.target_performance_ratio > 0 && params_and_results.find("perf_availability") != params_and_results.end()) {
+        std::cout << "  Perf Availability (>=" << args.target_performance_ratio * 100 << "%): "
+                  << params_and_results["perf_availability"] << std::endl;
+        std::cout << "  Perf Availability (nines): " << params_and_results["perf_avail_nines"] << std::endl;
     }
 
     // Write to output file if needed

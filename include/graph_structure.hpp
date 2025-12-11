@@ -119,6 +119,9 @@ public:
         const std::vector<std::string>& source_io_modules,
         const std::string& target_io_module);
 
+    // Calculate max flow from root to all io_modules (for backup store recovery)
+    double calculate_max_flow_from_root();
+
     // Get edge capacity in specified direction
     double get_edge_capacity(const std::string& from, const std::string& to,
                              FlowDirection direction) const;

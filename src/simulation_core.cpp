@@ -18,14 +18,15 @@ struct SimulationState {
     std::map<int, ECGroupFailureInfo> failure_info_per_ec_group;
     std::priority_queue<Event, std::vector<Event>, std::greater<Event>> failed_events;
     std::priority_queue<Event, std::vector<Event>, std::greater<Event>> repair_events;
-    std::map<NodeFailureKey, GraphStructure> failed_hardware_graph_table;
-    std::map<NodeFailureKey, DisconnectedStatus> disconnected_table;
-    std::map<FailureStateKey, FlowsAndSpeedEntry> flows_and_speed_table;
+    std::unordered_map<NodeFailureKey, GraphStructure, NodeFailureKeyHash> failed_hardware_graph_table;
+    std::unordered_map<NodeFailureKey, DisconnectedStatus, NodeFailureKeyHash> disconnected_table;
+    std::unordered_map<FailureStateKey, FlowsAndSpeedEntry, FailureStateKeyHash> flows_and_speed_table;
     std::unordered_map<std::string, int> node_index_map;
     int node_count = 0;
     int total_group_count = 0;
 
     double up_time = 0.0;
+    double perf_up_time = 0.0;  // Time with performance >= target
     double timestamp = 0.0;
     double prev_time = 0.0;
 
@@ -239,14 +240,19 @@ SimulationResult simulation_per_core(
     params.rebuild_bw_ratio = options.value("rebuild_bw_ratio", 0.2);
     params.degraded_ratio = options.value("degraded_ratio", 0.2);
 
+    // Performance availability threshold
+    params.target_performance_ratio = options.value("target_performance_ratio", 0.0);
+
     // Simulation control
     params.nprocs = params_and_results.at("nprocs");
     params.simulation_years = options.value("simulation_years", 10);
 
-    // EC encoding speed
-    params.ec_encoding_speed = Utils::get_encoding_latency_sec(params.ec_config.m, params.ec_config.k);
-    if (params.ec_encoding_speed > 0) {
-        params.ec_encoding_speed = params.disk_capacity / params.ec_encoding_speed;
+    // EC encoding speed (based on 256KB chunk encoding latency)
+    const double EC_CHUNK_SIZE = 256.0 * 1024.0;  // 256KB per chunk
+    double ec_latency_sec = Utils::get_encoding_latency_sec(params.ec_config.m, params.ec_config.k);
+    if (ec_latency_sec > 0) {
+        // Speed = chunk_size / latency_per_chunk (bytes/sec)
+        params.ec_encoding_speed = EC_CHUNK_SIZE / ec_latency_sec;
     } else {
         params.ec_encoding_speed = 1e15;  // Very large number (no bottleneck)
     }
@@ -376,6 +382,12 @@ SimulationResult simulation_per_core(
         state.total_data_loss_ratio += time_diff * data_loss_ratio;
         state.timestamp += time_diff;
 
+        // Update performance-based availability
+        double perf_ratio = flows_and_speed_entry.performance_ratio;
+        if (params.target_performance_ratio > 0 && perf_ratio >= params.target_performance_ratio) {
+            state.perf_up_time += time_diff;
+        }
+
         // Track bandwidth
         state.total_read_bandwidth += time_diff * flows_and_speed_entry.read_bandwidth;
         state.total_write_bandwidth += time_diff * flows_and_speed_entry.write_bandwidth;
@@ -420,8 +432,10 @@ SimulationResult simulation_per_core(
     // Return result
     SimulationResult result;
     result.up_time = state.up_time;
+    result.perf_up_time = state.perf_up_time;
     result.simulation_time = state.timestamp;
     result.availability = (state.timestamp > 0) ? (state.up_time / state.timestamp) : 1.0;
+    result.perf_availability = (state.timestamp > 0) ? (state.perf_up_time / state.timestamp) : 1.0;
     result.mttdl = state.total_mttdl;
     result.data_loss_events = state.data_loss_events;
     result.total_data_loss_ratio = state.total_data_loss_ratio / (state.timestamp > 0 ? state.timestamp : 1.0);

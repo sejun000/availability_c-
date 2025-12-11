@@ -53,8 +53,8 @@ void calculate_hardware_graph(
     const NodeFailureKey& key,
     const std::map<std::string, std::vector<std::string>>& enclosure_to_node_map,
     const nlohmann::json& options,
-    std::map<NodeFailureKey, GraphStructure>& failed_hardware_graph_table,
-    std::map<NodeFailureKey, DisconnectedStatus>& disconnected_table,
+    std::unordered_map<NodeFailureKey, GraphStructure, NodeFailureKeyHash>& failed_hardware_graph_table,
+    std::unordered_map<NodeFailureKey, DisconnectedStatus, NodeFailureKeyHash>& disconnected_table,
     const DiskIOModuleManager* disk_io_manager,
     int total_disks) {
 
