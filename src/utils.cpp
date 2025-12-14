@@ -247,18 +247,22 @@ double Utils::KMG_to_bytes(const std::string& s) {
     if (s.empty()) return 0.0;
 
     char last_char = s.back();
-    std::string number_part = s.substr(0, s.length() - 1);
-    double value = std::stod(number_part);
 
-    if (last_char == 'K') {
-        return value * 1000;
-    } else if (last_char == 'M') {
-        return value * 1000 * 1000;
-    } else if (last_char == 'G') {
-        return value * 1000 * 1000 * 1000;
+    // Check if last character is a suffix (K, M, G)
+    if (last_char == 'K' || last_char == 'M' || last_char == 'G') {
+        std::string number_part = s.substr(0, s.length() - 1);
+        double value = std::stod(number_part);
+
+        if (last_char == 'K') {
+            return value * 1000;
+        } else if (last_char == 'M') {
+            return value * 1000 * 1000;
+        } else if (last_char == 'G') {
+            return value * 1000 * 1000 * 1000;
+        }
     }
 
-    // If no suffix, parse the whole string as a number
+    // No suffix, parse the whole string as a number
     return std::stod(s);
 }
 

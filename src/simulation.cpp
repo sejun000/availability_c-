@@ -9,6 +9,7 @@
 #include <future>
 #include <random>
 #include <fstream>
+#include <limits>
 
 // Calculate probability of stripe failure under x device failures
 double pfail(int m, int k, int l, int x) {
@@ -618,8 +619,13 @@ void calculate_flows_and_speed(
                 }
 
                 // degraded read speed per spec-ish: min((n-k)*disk_read_bw*degraded_ratio, ec_speed) * impact_ratio
-                double degraded_speed = std::min(params.ec_encoding_speed,
-                                                static_cast<double>(read_sources) * params.disk_read_bw * params.degraded_ratio);
+                // For replication (or MULTI_EC with local replication), no EC encoding needed - skip ec_encoding_speed limit
+                double degraded_speed = static_cast<double>(read_sources) * params.disk_read_bw * params.degraded_ratio;
+                bool skip_ec_encoding = (ec_config.type == ECType::REPLICATION) ||
+                    (ec_config.type == ECType::MULTI_EC && ec_config.local_type == LocalType::REPLICATION);
+                if (!skip_ec_encoding) {
+                    degraded_speed = std::min(degraded_speed, params.ec_encoding_speed);
+                }
                 degraded_speed *= impact_ratio;
 
                 // Only reserve cross-switch bandwidth if traffic actually crosses io_modules
@@ -806,7 +812,11 @@ void calculate_flows_and_speed(
                     }
                 }
 
-                double rebuild_speed = params.ec_encoding_speed;
+                // For replication (or MULTI_EC with local replication), no EC encoding needed - skip ec_encoding_speed limit
+                bool skip_rebuild_encoding = (ec_config.type == ECType::REPLICATION) ||
+                    (ec_config.type == ECType::MULTI_EC && ec_config.local_type == LocalType::REPLICATION);
+                double rebuild_speed = skip_rebuild_encoding ?
+                    std::numeric_limits<double>::max() : params.ec_encoding_speed;
                 std::map<std::pair<std::string, std::string>, double> flow_map;
                 std::map<std::pair<std::string, std::string>, double> down_flow_map;
                 double max_up = 0.0;
@@ -814,7 +824,7 @@ void calculate_flows_and_speed(
 
                 if (is_intra_io_module) {
                     // Intra-io_module: no cross-switch traffic needed
-                    // Speed limited only by disk I/O and encoding
+                    // Speed limited only by disk I/O (and encoding for EC)
                     rebuild_speed = std::min(rebuild_speed, static_cast<double>(required_reads) * params.disk_read_bw);
                     rebuild_speed = std::min(rebuild_speed, params.disk_write_bw);
                 } else {
@@ -834,7 +844,7 @@ void calculate_flows_and_speed(
                         continue;
                     }
 
-                    // Rebuild speed limited by encoding + upstream read path + downstream write path
+                    // Rebuild speed limited by encoding (for EC) + upstream read path + downstream write path
                     rebuild_speed = std::min(rebuild_speed, max_up * params.rebuild_bw_ratio);
                     rebuild_speed = std::min(rebuild_speed, max_down * params.rebuild_bw_ratio);
                     // Also limited by per-disk IO (approx)

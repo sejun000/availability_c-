@@ -30,6 +30,7 @@ struct Arguments {
     double rebuild_bw_ratio = 0.2;
     double degraded_ratio = 0.2;
     double target_performance_ratio = 0.0;  // 0 = disabled
+    std::string data_loss_rebuild_bw_str = "100M";  // Fixed rebuild BW during data loss (default: 100M)
     int num_simulations = 400000;  // Number of Monte Carlo iterations
     int simulation_years = 10;     // Virtual years per simulation
     bool no_result = false;
@@ -58,6 +59,7 @@ void print_usage() {
     std::cerr << "  --rebuild_bw_ratio <double> Rebuild bandwidth ratio (default: 0.2)" << std::endl;
     std::cerr << "  --degraded_ratio <double>  Degraded read ratio (default: 0.2)" << std::endl;
     std::cerr << "  --target_perf <double>    Target performance ratio for perf_availability (default: 0)" << std::endl;
+    std::cerr << "  --data_loss_rebuild_bw <string>  Fixed rebuild BW during data loss (default: 100M)" << std::endl;
     std::cerr << "  --num_sim <int>           Number of Monte Carlo iterations (default: 200000)" << std::endl;
     std::cerr << "  --sim_years <int>         Virtual years per simulation (default: 10)" << std::endl;
     std::cerr << "  --no_result               Don't write results to file" << std::endl;
@@ -95,6 +97,7 @@ Arguments parse_arguments(int argc, char* argv[]) {
         else if (arg == "--rebuild_bw_ratio" && i + 1 < argc) args.rebuild_bw_ratio = std::stod(argv[++i]);
         else if (arg == "--degraded_ratio" && i + 1 < argc) args.degraded_ratio = std::stod(argv[++i]);
         else if (arg == "--target_perf" && i + 1 < argc) args.target_performance_ratio = std::stod(argv[++i]);
+        else if (arg == "--data_loss_rebuild_bw" && i + 1 < argc) args.data_loss_rebuild_bw_str = argv[++i];
         else if (arg == "--num_sim" && i + 1 < argc) args.num_simulations = std::stoi(argv[++i]);
         else if (arg == "--sim_years" && i + 1 < argc) args.simulation_years = std::stoi(argv[++i]);
         else if (arg == "--no_result") args.no_result = true;
@@ -212,12 +215,14 @@ int main(int argc, char* argv[]) {
     // Set EC-related options
     options["ec_type"] = args.ec_type;
     options["n"] = args.n;
+    options["total_disks"] = args.total_disks;
     options["local_m"] = args.local_m;
     options["local_k"] = args.local_k;
     options["local_n"] = args.local_n;
     options["rebuild_bw_ratio"] = args.rebuild_bw_ratio;
     options["degraded_ratio"] = args.degraded_ratio;
     options["target_performance_ratio"] = args.target_performance_ratio;
+    options["data_loss_rebuild_bw"] = Utils::KMG_to_bytes(args.data_loss_rebuild_bw_str);
     options["simulation_years"] = args.simulation_years;
 
     // Set disk failure trace file (CLI overrides JSON config)
@@ -237,24 +242,71 @@ int main(int argc, char* argv[]) {
     std::cout << "  Durability: " << params_and_results["durability"] << std::endl;
     std::cout << "  Durability (nines): " << params_and_results["durability_nines"] << std::endl;
 
-    if (params_and_results.find("mttdl") != params_and_results.end() &&
-        params_and_results["mttdl"].get<double>() > 0) {
-        std::cout << "  MTTDL: " << params_and_results["mttdl"].get<double>() << " hours" << std::endl;
+    if (params_and_results.find("pdl_ratio") != params_and_results.end()) {
+        double pdl = params_and_results["pdl_ratio"].get<double>();
+        std::cout << "  PDL (data loss ratio): " << pdl << std::endl;
+    }
+
+    if (params_and_results.find("mttdl_per_ec_group") != params_and_results.end() &&
+        params_and_results["mttdl_per_ec_group"].get<double>() > 0) {
+        double mttdl_per_group = params_and_results["mttdl_per_ec_group"].get<double>();
+        int num_groups = 1;
+        if (params_and_results.find("num_ec_groups") != params_and_results.end()) {
+            num_groups = params_and_results["num_ec_groups"].get<int>();
+        }
+        std::cout << "  MTTDL (per EC group): " << mttdl_per_group << " hours ("
+                  << (mttdl_per_group / 8760.0) << " years)" << std::endl;
+        std::cout << "  MTTDL (system): " << params_and_results["mttdl_system"].get<double>()
+                  << " hours (" << num_groups << " EC groups)" << std::endl;
     }
 
     if (params_and_results.find("data_loss_events") != params_and_results.end()) {
         std::cout << "  Data loss events: " << params_and_results["data_loss_events"] << std::endl;
+        if (params_and_results.find("data_loss_events_per_year") != params_and_results.end()) {
+            std::cout << "  Data loss events/year: "
+                      << params_and_results["data_loss_events_per_year"].get<double>() << std::endl;
+        }
+    }
+
+    if (params_and_results.find("disk_failure_events") != params_and_results.end()) {
+        std::cout << "  Disk failure events: " << params_and_results["disk_failure_events"] << std::endl;
     }
 
     if (params_and_results.find("avg_rebuilding_time") != params_and_results.end()) {
         std::cout << "  Avg rebuild time: " << params_and_results["avg_rebuilding_time"].get<double>() << " hours" << std::endl;
     }
 
+    // Rebuild-specific metrics
+    if (params_and_results.find("avg_rebuild_speed") != params_and_results.end()) {
+        double avg_rebuild_speed = params_and_results["avg_rebuild_speed"].get<double>();
+        std::cout << "  Avg rebuild speed: " << (avg_rebuild_speed / 1e6) << " MB/s" << std::endl;
+    }
+    if (params_and_results.find("avg_host_read_bw_during_rebuild") != params_and_results.end()) {
+        double avg_read_bw = params_and_results["avg_host_read_bw_during_rebuild"].get<double>();
+        std::cout << "  Avg host READ BW during rebuild: " << (avg_read_bw / 1e9) << " GB/s" << std::endl;
+    }
+    if (params_and_results.find("avg_host_write_bw_during_rebuild") != params_and_results.end()) {
+        double avg_write_bw = params_and_results["avg_host_write_bw_during_rebuild"].get<double>();
+        std::cout << "  Avg host WRITE BW during rebuild: " << (avg_write_bw / 1e9) << " GB/s" << std::endl;
+    }
+
     // Performance availability (if target_perf specified)
-    if (args.target_performance_ratio > 0 && params_and_results.find("perf_availability") != params_and_results.end()) {
-        std::cout << "  Perf Availability (>=" << args.target_performance_ratio * 100 << "%): "
-                  << params_and_results["perf_availability"] << std::endl;
-        std::cout << "  Perf Availability (nines): " << params_and_results["perf_avail_nines"] << std::endl;
+    if (args.target_performance_ratio > 0) {
+        if (params_and_results.find("perf_availability_read") != params_and_results.end()) {
+            std::cout << "  Perf Availability READ (>=" << args.target_performance_ratio * 100 << "%): "
+                      << params_and_results["perf_availability_read"] << std::endl;
+            std::cout << "  Perf Availability READ (nines): " << params_and_results["perf_avail_nines_read"] << std::endl;
+        }
+        if (params_and_results.find("perf_availability_write") != params_and_results.end()) {
+            std::cout << "  Perf Availability WRITE (>=" << args.target_performance_ratio * 100 << "%): "
+                      << params_and_results["perf_availability_write"] << std::endl;
+            std::cout << "  Perf Availability WRITE (nines): " << params_and_results["perf_avail_nines_write"] << std::endl;
+        }
+        if (params_and_results.find("perf_availability_min") != params_and_results.end()) {
+            std::cout << "  Perf Availability MIN (>=" << args.target_performance_ratio * 100 << "%): "
+                      << params_and_results["perf_availability_min"] << std::endl;
+            std::cout << "  Perf Availability MIN (nines): " << params_and_results["perf_avail_nines_min"] << std::endl;
+        }
     }
 
     // Write to output file if needed

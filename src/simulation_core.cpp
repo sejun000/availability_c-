@@ -266,6 +266,7 @@ SimulationResult simulation_per_core(
     params.ec_config.local_m = options.value("local_m", 0);
     params.ec_config.local_k = options.value("local_k", 0);
     params.ec_config.local_n = options.value("local_n", 0);
+    params.ec_config.local_type = parse_local_type(options.value("local_type", "ec"));
     params.ec_config.validate();
 
     // Disk parameters

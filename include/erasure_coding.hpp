@@ -8,9 +8,16 @@
 
 // Erasure Coding Types
 enum class ECType {
-    STANDARD,   // Standard EC: m+k, tolerates k failures
-    LRC,        // Local Reconstruction Code: local_m+local_k groups within m+k
-    MULTI_EC    // Multi-level EC: local stripe (local_m+local_k) treated as chunk for outer m+k
+    STANDARD,    // Standard EC: m+k, tolerates k failures
+    LRC,         // Local Reconstruction Code: local_m+local_k groups within m+k
+    MULTI_EC,    // Multi-level EC: local stripe (local_m+local_k) treated as chunk for outer m+k
+    REPLICATION  // N-way replication: 1 original + (n-1) replicas, rebuild reads 1 disk
+};
+
+// Local layer type for MULTI_EC
+enum class LocalType {
+    EC,          // Local layer uses erasure coding (default, original MULTI_EC behavior)
+    REPLICATION  // Local layer uses replication (each local group is n-way replicated)
 };
 
 // Erasure Coding Configuration
@@ -28,6 +35,9 @@ struct ECConfig {
     // Disk group size (for declustered parity placement)
     int n = 0;          // Disk group size for standard EC / LRC
     int local_n = 0;    // Local disk group size for Multi-EC
+
+    // Local layer type for MULTI_EC (default: EC for backward compatibility)
+    LocalType local_type = LocalType::EC;
 
     // Computed values
     int total_disks = 0;        // Total disks in the EC group
@@ -56,16 +66,39 @@ struct ECConfig {
                 break;
 
             case ECType::MULTI_EC:
-                if (m <= 0 || k < 0 || local_m <= 0 || local_k < 0) return false;
-                if (local_n < local_m + local_k) return false;
+                if (m <= 0 || k < 0) return false;
                 if (n < m + k) return false;  // n is number of local groups for outer EC
                 {
                     int num_local_groups = m + k;  // Each local stripe is a chunk
-                    total_disks = local_n * num_local_groups;
-                    double local_ratio = static_cast<double>(local_m) / (local_m + local_k);
+                    double local_ratio;
+
+                    if (local_type == LocalType::REPLICATION) {
+                        // Local layer uses replication: local_n copies per chunk
+                        if (local_n <= 0) return false;
+                        total_disks = local_n * num_local_groups;
+                        local_ratio = 1.0 / local_n;  // Replication efficiency
+                    } else {
+                        // Local layer uses EC (original behavior)
+                        if (local_m <= 0 || local_k < 0) return false;
+                        if (local_n < local_m + local_k) return false;
+                        total_disks = local_n * num_local_groups;
+                        local_ratio = static_cast<double>(local_m) / (local_m + local_k);
+                    }
+
                     double outer_ratio = static_cast<double>(m) / (m + k);
                     effective_ratio = local_ratio * outer_ratio;
                 }
+                break;
+
+            case ECType::REPLICATION:
+                // n-way replication: n copies of data
+                // k = n - 1 (tolerates n-1 failures)
+                // m = 1 (single data unit)
+                if (n <= 0) return false;
+                m = 1;
+                k = n - 1;
+                total_disks = n;
+                effective_ratio = 1.0 / n;  // 1/n storage efficiency
                 break;
         }
         return true;
@@ -83,6 +116,8 @@ struct ECConfig {
                 // Complex: depends on failure distribution
                 // Worst case: k outer failures, each with local_k local failures
                 return k;  // Conservative estimate
+            case ECType::REPLICATION:
+                return k;  // n-1 failures tolerable
         }
         return 0;
     }
@@ -103,6 +138,14 @@ public:
     // Initialize from JSON config
     void initialize(const ECConfig& config);
 
+    // Initialize with custom group mapping
+    // ec_groups: vector of vectors, each inner vector contains disk indices for that group
+    void initialize_with_custom_groups(const ECConfig& config,
+                                        const std::vector<std::vector<int>>& ec_groups);
+
+    // Check if using custom mapping
+    bool has_custom_mapping() const { return use_custom_mapping_; }
+
     // Get EC configuration
     const ECConfig& get_config() const { return config_; }
 
@@ -118,6 +161,9 @@ public:
     // Calculate data loss ratio
     double get_data_loss_ratio(const std::set<int>& failed_disks) const;
 
+    // Check if data loss occurred (considers LRC local parity)
+    bool is_data_loss(const std::set<int>& failed_disks) const;
+
     // Get number of read disks needed for rebuild
     int get_rebuild_read_count(const std::set<int>& failed_disks, int target_disk) const;
 
@@ -125,16 +171,33 @@ public:
     bool can_local_rebuild(const std::set<int>& failed_disks, int target_disk) const;
 
     // Get the disk group size
-    int get_group_size() const { return config_.n > 0 ? config_.n : config_.m + config_.k; }
+    int get_group_size() const {
+        if (config_.type == ECType::MULTI_EC) {
+            return config_.total_disks;
+        }
+        return config_.n > 0 ? config_.n : config_.m + config_.k;
+    }
 
     // Get total number of EC groups
     int get_total_groups(int total_disks) const;
 
-    // Get start disk index for a group
+    // Get start disk index for a group (only meaningful for sequential mapping)
     int get_group_start_disk(int group_index) const;
+
+    // Get all disks in a specific group (works with both custom and sequential mapping)
+    std::vector<int> get_group_disks(int group_index) const;
+
+    // Convert absolute disk indices to relative indices (0-based within EC group)
+    // This is needed for LRC local group calculation with custom mapping
+    std::set<int> to_relative_indices(int group_index, const std::set<int>& absolute_indices) const;
 
 private:
     ECConfig config_;
+
+    // Custom mapping support
+    bool use_custom_mapping_ = false;
+    std::map<int, int> disk_to_group_;           // disk_index -> group_index
+    std::vector<std::vector<int>> group_to_disks_;  // group_index -> [disk_indices]
 };
 
 // Parse EC type from string
@@ -142,3 +205,9 @@ ECType parse_ec_type(const std::string& type_str);
 
 // Convert EC type to string
 std::string ec_type_to_string(ECType type);
+
+// Parse local type from string
+LocalType parse_local_type(const std::string& type_str);
+
+// Convert local type to string
+std::string local_type_to_string(LocalType type);

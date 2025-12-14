@@ -360,6 +360,76 @@ double GraphStructure::maximum_flow(const std::string& source, const std::string
     return max_flow;
 }
 
+double GraphStructure::maximum_flow_with_flows(
+    const std::string& source,
+    const std::string& sink,
+    FlowDirection direction,
+    std::map<std::pair<std::string, std::string>, double>& flow_out) {
+
+    flow_out.clear();
+
+    if (disabled_nodes_.find(source) != disabled_nodes_.end() ||
+        disabled_nodes_.find(sink) != disabled_nodes_.end()) {
+        return 0.0;
+    }
+
+    auto residual = build_residual_graph(direction);
+    double max_flow = 0.0;
+
+    std::map<std::string, std::string> parent;
+
+    while (bfs(source, sink, parent, residual, direction)) {
+        double path_flow = std::numeric_limits<double>::max();
+        std::string current = sink;
+
+        while (current != source) {
+            const std::string& prev = parent[current];
+            auto prev_it = residual.find(prev);
+            if (prev_it == residual.end()) {
+                path_flow = 0.0;
+                break;
+            }
+            auto cap_it = prev_it->second.find(current);
+            if (cap_it == prev_it->second.end()) {
+                path_flow = 0.0;
+                break;
+            }
+            path_flow = std::min(path_flow, cap_it->second);
+            current = prev;
+        }
+
+        if (path_flow <= 0.0 || path_flow == std::numeric_limits<double>::max()) {
+            break;
+        }
+
+        current = sink;
+        while (current != source) {
+            const std::string prev = parent[current];
+
+            residual[prev][current] -= path_flow;
+            residual[current][prev] += path_flow;
+
+            flow_out[{prev, current}] += path_flow;
+            flow_out[{current, prev}] -= path_flow;
+
+            current = prev;
+        }
+
+        max_flow += path_flow;
+        parent.clear();
+    }
+
+    for (auto it = flow_out.begin(); it != flow_out.end(); ) {
+        if (it->second <= 0.0) {
+            it = flow_out.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    return max_flow;
+}
+
 // LCA functions
 void GraphStructure::build_parent_map(const std::string& root_module) {
     parent_map_.clear();
@@ -616,26 +686,7 @@ double GraphStructure::calculate_rebuild_max_flow_via_io_modules(
 }
 
 double GraphStructure::calculate_max_flow_from_root() {
-    // Find root node (usually "root" or node with no incoming edges from non-disk nodes)
-    std::string root_node;
-    if (nodes_.count("root") > 0) {
-        root_node = "root";
-    } else {
-        // Find the node that appears only as source in edges (likely root)
-        for (const auto& node : nodes_) {
-            if (node.find("io_module") == std::string::npos &&
-                node.find("disk") == std::string::npos &&
-                node.find("virtual") == std::string::npos) {
-                // Check if this node has outgoing edges but minimal incoming
-                bool has_outgoing = adjacency_list_.count(node) > 0 && !adjacency_list_.at(node).empty();
-                if (has_outgoing) {
-                    root_node = node;
-                    break;
-                }
-            }
-        }
-    }
-
+    std::string root_node = find_root_node();
     if (root_node.empty()) {
         return MAX_EDGE_VALUE;  // No root found, assume unlimited
     }
@@ -668,6 +719,65 @@ double GraphStructure::calculate_max_flow_from_root() {
     }
 
     return flow;
+}
+
+double GraphStructure::calculate_max_flow_to_root() {
+    std::string root_node = find_root_node();
+    if (root_node.empty()) {
+        return MAX_EDGE_VALUE;
+    }
+
+    std::vector<std::string> io_modules;
+    for (const auto& node : nodes_) {
+        if (node.find("io_module") != std::string::npos) {
+            io_modules.push_back(node);
+        }
+    }
+    if (io_modules.empty()) {
+        return MAX_EDGE_VALUE;
+    }
+
+    const std::string vsrc = "read_virtual_source";
+    nodes_.insert(vsrc);
+
+    for (const auto& io_mod : io_modules) {
+        adjacency_list_[vsrc][io_mod] = {MAX_EDGE_VALUE, MAX_EDGE_VALUE};
+        adjacency_list_[io_mod][vsrc] = {MAX_EDGE_VALUE, MAX_EDGE_VALUE};
+    }
+
+    double flow = maximum_flow(vsrc, root_node, FlowDirection::UPSTREAM);
+
+    nodes_.erase(vsrc);
+    adjacency_list_.erase(vsrc);
+    for (auto& [node, neighbors] : adjacency_list_) {
+        neighbors.erase(vsrc);
+    }
+
+    return flow;
+}
+
+std::string GraphStructure::find_root_node() const {
+    if (nodes_.count("root") > 0) {
+        return "root";
+    }
+
+    for (const auto& node : nodes_) {
+        if (node.find("io_module") != std::string::npos ||
+            node.find("disk") != std::string::npos ||
+            node.find("virtual") != std::string::npos ||
+            node.find("__rebuild_") != std::string::npos ||
+            node.find("backup_virtual") != std::string::npos ||
+            node.find("read_virtual") != std::string::npos) {
+            continue;
+        }
+
+        bool has_outgoing = adjacency_list_.count(node) > 0 && !adjacency_list_.at(node).empty();
+        if (has_outgoing) {
+            return node;
+        }
+    }
+
+    return "";
 }
 
 double GraphStructure::get_edge_capacity(const std::string& from, const std::string& to,

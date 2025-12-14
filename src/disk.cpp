@@ -27,6 +27,7 @@ DiskInfo::DiskInfo(int idx, const std::string& io_mod, double read_bw, double wr
     , remaining_capacity_to_rebuild(0.0)
     , rebuild_speed(0.0)
     , remaining_replace_time(0.0)
+    , rebuild_start_timestamp(0.0)
     , read_bandwidth(read_bw)
     , write_bandwidth(write_bw)
 {}
@@ -45,7 +46,7 @@ DiskState DiskInfo::get_effective_state() const {
 }
 
 bool DiskInfo::needs_rebuild() const {
-    return (is_failed || is_disconnected) && remaining_capacity_to_rebuild > 0;
+    return remaining_replace_time > 0 || remaining_capacity_to_rebuild > 0;
 }
 
 double DiskInfo::get_remaining_rebuild_time() const {

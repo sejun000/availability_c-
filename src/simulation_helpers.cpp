@@ -27,19 +27,28 @@ NodeFailureKey build_node_failure_key(
 // Build failure state key from current state
 FailureStateKey build_failure_state_key(
     const std::map<std::string, bool>& failed_nodes_and_enclosures,
-    const std::map<int, ECGroupFailureInfo>& failure_info_per_ec_group,
+    const std::map<int, DiskInfo>& disks,
     const std::unordered_map<std::string, int>& node_index_map,
     int node_count,
-    int total_group_count) {
+    int total_disks) {
 
     FailureStateKey key;
     key.node_key = build_node_failure_key(failed_nodes_and_enclosures, node_index_map, node_count);
-    key.failure_counts.resize(total_group_count, 0);
+    key.disk_state.resize(std::max(0, total_disks), 0);
 
-    for (const auto& [group_index, failure_info] : failure_info_per_ec_group) {
-        if (group_index < total_group_count) {
-            key.failure_counts[group_index] = static_cast<uint8_t>(
-                std::min(255, failure_info.get_unavailable_count()));
+    for (int disk_index = 0; disk_index < total_disks; ++disk_index) {
+        auto it = disks.find(disk_index);
+        if (it == disks.end()) {
+            continue;
+        }
+        const DiskInfo& disk = it->second;
+
+        if (disk.is_failed || disk.is_disconnected) {
+            key.disk_state[disk_index] = 1;
+        } else if (disk.needs_rebuild()) {
+            key.disk_state[disk_index] = 2;
+        } else {
+            key.disk_state[disk_index] = 0;
         }
     }
 
@@ -98,6 +107,7 @@ void calculate_hardware_graph(
 // Initialize simulation
 std::tuple<std::map<std::string, std::string>,
            std::map<std::string, std::vector<std::string>>,
+           double,
            double>
 initialize_simulation(
     GraphStructure& hardware_graph,
@@ -147,15 +157,18 @@ initialize_simulation(
     // Build parent map for LCA calculation
     hardware_graph.build_parent_map(start_module);
 
-    // Calculate max flow without any failure
+    // Calculate baseline host bandwidths without any failure.
     GraphStructure hardware_graph_copy = hardware_graph.clone();
-    hardware_graph_copy.add_virtual_nodes(start_module, end_module, FlowDirection::UPSTREAM);
-    double max_flow_hardware = hardware_graph_copy.maximum_flow("virtual_source", "virtual_sink", FlowDirection::UPSTREAM);
-    hardware_graph_copy.remove_virtual_nodes();
+    double max_read = hardware_graph_copy.calculate_max_flow(end_module, start_module, FlowDirection::UPSTREAM);
+    double max_write = hardware_graph_copy.calculate_max_flow(start_module, end_module, FlowDirection::DOWNSTREAM);
 
-    Logger::getInstance().info("Max flow without failure: " + std::to_string(max_flow_hardware / 1e9) + " GB/s");
+    Logger::getInstance().info("Max host READ bw without failure: " + std::to_string(max_read / 1e9) + " GB/s");
+    Logger::getInstance().info("Max host WRITE bw without failure: " + std::to_string(max_write / 1e9) + " GB/s");
 
-    return {node_to_module_map, enclosure_to_node_map, max_flow_hardware};
+    (void)disk_read_bw;
+    (void)total_disk_count;
+
+    return {node_to_module_map, enclosure_to_node_map, max_read, max_write};
 }
 
 // Calculate data loss ratio for EC schemes

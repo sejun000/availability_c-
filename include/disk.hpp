@@ -37,6 +37,7 @@ struct DiskInfo {
     double remaining_capacity_to_rebuild = 0.0;  // Bytes remaining to rebuild
     double rebuild_speed = 0.0;                  // Current rebuild speed (bytes/sec)
     double remaining_replace_time = 0.0;         // Time until replacement disk arrives (for failures)
+    double rebuild_start_timestamp = 0.0;        // When rebuild (or resync) started
 
     // Performance
     double read_bandwidth = 0.0;            // Read bandwidth (bytes/sec)

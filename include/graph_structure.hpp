@@ -100,6 +100,14 @@ public:
     double maximum_flow(const std::string& source, const std::string& sink,
                         FlowDirection direction = FlowDirection::UPSTREAM);
 
+    // Maximum flow calculation that also outputs per-edge flow (directed).
+    // `flow_out[(u,v)]` is the net flow sent on u->v (only positive entries are meaningful).
+    double maximum_flow_with_flows(
+        const std::string& source,
+        const std::string& sink,
+        FlowDirection direction,
+        std::map<std::pair<std::string, std::string>, double>& flow_out);
+
     // LCA (Lowest Common Ancestor) functions
     void build_parent_map(const std::string& root_module);
     std::vector<std::string> get_path_to_root(const std::string& node) const;
@@ -121,6 +129,12 @@ public:
 
     // Calculate max flow from root to all io_modules (for backup store recovery)
     double calculate_max_flow_from_root();
+
+    // Calculate max flow from all io_modules to root (host READ direction).
+    double calculate_max_flow_to_root();
+
+    // Best-effort root selection used by calculate_max_flow_* helpers.
+    std::string find_root_node() const;
 
     // Get edge capacity in specified direction
     double get_edge_capacity(const std::string& from, const std::string& to,
