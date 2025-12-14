@@ -1,0 +1,264 @@
+# spec3 (spec2.txt 보강/확정 - Encoding Overhead 및 성능 메트릭)
+
+이 문서는 `spec2.txt`의 요구를 기반으로, encoding overhead 모델링과 성능 메트릭 출력에 대해 확정된 내용을 정리한 추가 스펙이다.
+`spec.txt`, `spec2.txt`와 함께 적용한다.
+
+---
+
+## 1. Encoding Entity 모델
+
+### 1.1 개념
+
+Erasure Coding의 parity 계산(encoding)은 두 가지 주체에 의해 수행될 수 있다:
+
+1. **Controller Encoding**: 호스트/컨트롤러가 parity를 계산
+   - 데이터가 이미 인코딩된 상태로 IO module에 전송됨
+   - IO module 간 cross-traffic 없음
+   - Switch 대역폭에 추가 부담 없음
+
+2. **IO Module Encoding**: IO module이 직접 parity를 계산
+   - IO module이 다른 IO module로부터 데이터를 받아 parity 계산
+   - **Cross-traffic 발생**: IO module 간 switch를 통해 데이터 교환
+   - 각 IO module의 port 대역폭을 cross-traffic이 점유
+
+### 1.2 설정 방법
+
+JSON config의 `options` 섹션에서 지정:
+
+```json
+{
+  "options": {
+    "encoding_entity": "io_module",  // "controller" 또는 "io_module"
+    ...
+  }
+}
+```
+
+기본값: `"controller"` (cross-traffic 없음)
+
+---
+
+## 2. Cross-Traffic 모델링
+
+### 2.1 Cross-Traffic Ratio 계산
+
+IO module encoding 시, 각 IO module은 다른 모든 IO module로부터 데이터를 받아야 한다.
+
+**공식:**
+```
+cross_ratio = N - 1
+```
+- `N`: 전체 IO module 개수
+
+**의미:**
+- N=2인 경우: cross_ratio = 1 (자기 자신 외 1개의 IO module에서 데이터 수신)
+- N=3인 경우: cross_ratio = 2 (자기 자신 외 2개의 IO module에서 데이터 수신)
+
+### 2.2 Effective Write Bandwidth 계산
+
+Cross-traffic은 각 IO module port의 대역폭을 소비한다.
+
+**공식:**
+```
+effective_write_bw = raw_write_bw / (1 + cross_ratio)
+```
+
+**예시 (2개 IO module, 각각 25GB/s):**
+- raw_write_bw = 50 GB/s (25G × 2)
+- cross_ratio = 1
+- effective_write_bw = 50 / 2 = 25 GB/s
+
+### 2.3 적용 조건
+
+Cross-traffic overhead는 다음 조건을 **모두** 만족할 때만 적용:
+1. `encoding_entity == "io_module"`
+2. `ec_config.k > 0` (parity가 존재)
+3. `io_module_count > 1` (여러 IO module 존재)
+
+Replication (`k=0`)의 경우 parity 계산이 없으므로 cross-traffic 없음.
+
+---
+
+## 3. Baseline Performance 계산
+
+### 3.1 정의
+
+- `max_read_performance`: 장애가 없을 때의 최대 READ 대역폭
+- `max_write_performance`: 장애가 없을 때의 최대 WRITE 대역폭
+
+### 3.2 Baseline WRITE에 Encoding Overhead 적용
+
+**중요:** IO module encoding 사용 시, baseline WRITE 성능에도 encoding overhead가 적용된다.
+
+```cpp
+if (encoding_entity == IO_MODULE && k > 0 && io_module_count > 1) {
+    cross_ratio = io_module_count - 1;
+    max_write_performance /= (1.0 + cross_ratio);
+}
+```
+
+이는 perf_availability 계산 시 baseline 대비 비율을 정확히 계산하기 위함이다.
+
+---
+
+## 4. Performance Availability 계산
+
+### 4.1 정의
+
+Performance Availability는 시스템이 목표 성능 비율(`target_performance_ratio`) 이상을 유지한 시간 비율이다.
+
+```
+perf_availability = perf_up_time / simulation_time
+```
+
+### 4.2 READ/WRITE 분리 계산
+
+```
+performance_ratio_read = current_read_bw / max_read_performance
+performance_ratio_write = current_write_bw / max_write_performance
+performance_ratio_min = min(read, write)
+```
+
+### 4.3 Encoding Overhead와의 관계
+
+**핵심 원칙:** Encoding overhead는 baseline과 current 모두에 동일하게 적용되므로, perf_availability **비율**에는 영향을 주지 않는다.
+
+**예시:**
+- Controller encoding: baseline=50, current=49.6 → ratio = 99.2%
+- IO module encoding: baseline=25, current=24.8 → ratio = 99.2%
+
+**차이점은 절대 대역폭:**
+- Controller: 49.6 GB/s 실제 WRITE 가능
+- IO module: 24.8 GB/s 실제 WRITE 가능 (50% 감소)
+
+---
+
+## 5. 출력 메트릭
+
+### 5.1 Console 출력
+
+다음 메트릭이 시뮬레이션 결과에 출력된다:
+
+```
+  Avg rebuild speed: X MB/s
+  Avg host READ BW during rebuild: X GB/s
+  Avg host WRITE BW during rebuild: X GB/s
+  Baseline max READ BW: X GB/s
+  Baseline max WRITE BW: X GB/s
+  Avg READ BW (overall): X GB/s
+  Avg WRITE BW (overall): X GB/s
+  Perf Availability READ (>=Y%): Z
+  Perf Availability WRITE (>=Y%): Z
+  Perf Availability MIN (>=Y%): Z
+```
+
+### 5.2 CSV 출력 (results.txt)
+
+다음 컬럼이 CSV에 저장된다:
+- `max_read_performance`: Baseline READ 대역폭 (bytes/sec)
+- `max_write_performance`: Baseline WRITE 대역폭 (bytes/sec)
+- `avg_read_bandwidth`: 전체 평균 READ 대역폭
+- `avg_write_bandwidth`: 전체 평균 WRITE 대역폭
+- `avg_host_read_bw_during_rebuild`: Rebuild 중 평균 READ 대역폭
+- `avg_host_write_bw_during_rebuild`: Rebuild 중 평균 WRITE 대역폭
+- `perf_availability_read`, `perf_availability_write`, `perf_availability_min`
+- `perf_avail_nines_read`, `perf_avail_nines_write`, `perf_avail_nines_min`
+
+---
+
+## 6. 설계 정책
+
+### 6.1 Non-blocking Switch 가정
+
+Switch는 non-blocking으로 모델링:
+- 각 port의 대역폭은 독립적으로 보장
+- 총 switch backplane 대역폭은 모든 port 대역폭의 합 이상
+
+따라서 cross-traffic은 switch 자체가 아닌, **각 IO module port의 대역폭**을 소비한다.
+
+### 6.2 대칭적 데이터 분배 가정
+
+IO module encoding 시:
+- 모든 IO module에 데이터가 균등하게 분배됨
+- 각 IO module은 전체 데이터의 1/N을 처리
+- Cross-traffic은 (N-1)/N 비율로 발생
+
+### 6.3 READ에는 Encoding Overhead 없음
+
+READ 연산은 parity 계산이 필요 없으므로:
+- encoding overhead는 WRITE에만 적용
+- READ는 항상 full bandwidth 사용 가능
+
+### 6.4 Rebuild Traffic과의 독립성
+
+Encoding overhead와 rebuild traffic은 별도로 계산:
+1. 먼저 rebuild traffic으로 인한 edge reservation 적용
+2. 그 다음 encoding overhead 적용 (WRITE에만)
+
+---
+
+## 7. Config 예시
+
+### 7.1 Controller Encoding (overhead 없음)
+
+```json
+{
+  "options": {
+    "encoding_entity": "controller",
+    "ec_type": "standard",
+    "n": 16,
+    "target_performance_ratio": 0.99
+  },
+  "edges": [
+    {"start": "switch0", "end": "io_module0", "bandwidth": "25G"},
+    {"start": "switch0", "end": "io_module1", "bandwidth": "25G"}
+  ]
+}
+```
+
+결과:
+- Baseline max WRITE: 50 GB/s
+- Avg WRITE during rebuild: ~49.6 GB/s
+
+### 7.2 IO Module Encoding (overhead 있음)
+
+```json
+{
+  "options": {
+    "encoding_entity": "io_module",
+    "ec_type": "standard",
+    "n": 16,
+    "target_performance_ratio": 0.99
+  },
+  "edges": [
+    {"start": "switch0", "end": "io_module0", "bandwidth": "25G"},
+    {"start": "switch0", "end": "io_module1", "bandwidth": "25G"}
+  ]
+}
+```
+
+결과:
+- Baseline max WRITE: 25 GB/s (50% 감소)
+- Avg WRITE during rebuild: ~24.8 GB/s
+
+---
+
+## 8. 향후 확장 고려사항
+
+### 8.1 Partial Stripe Write
+
+현재는 full stripe write만 고려. Partial stripe write의 경우:
+- Read-Modify-Write 오버헤드 추가 가능
+- 추가 cross-traffic 발생 가능
+
+### 8.2 비대칭 IO Module 대역폭
+
+현재는 모든 IO module이 동일한 대역폭 가정. 향후:
+- 비대칭 대역폭 지원 시 cross_ratio 계산 수정 필요
+- Weighted average 기반 계산 고려
+
+### 8.3 Multi-hop Topology
+
+현재는 switch-io_module 단일 hop 가정. Multi-hop의 경우:
+- Cross-traffic이 여러 edge를 통과
+- 각 hop에서 대역폭 reservation 필요
