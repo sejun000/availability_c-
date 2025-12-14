@@ -1,0 +1,56 @@
+{
+  "options": {
+    "start_module": "switch",
+    "end_module": "io_module",
+    "lowest_common_module": "switch",
+    "highest_local_module": "io_module",
+    "prep_time_for_rebuilding": 4,
+    "rebuild_bw_ratio": 0.2,
+    "simulation_years": 1,
+    "tlc_read_bw": "7G",
+    "tlc_write_bw": "4G",
+    "ssd_arr": 0.0327,
+    "ec_type": "standard",
+    "n": 6,
+    "encoding_entity": "io_module",
+    "encoding_chunk_size": "1M",
+    "ec_groups": [
+      [0, 1, 2, 24, 25, 26],
+      [3, 4, 5, 27, 28, 29],
+      [6, 7, 8, 30, 31, 32],
+      [9, 10, 11, 33, 34, 35],
+      [12, 13, 14, 36, 37, 38],
+      [15, 16, 17, 39, 40, 41],
+      [18, 19, 20, 42, 43, 44],
+      [21, 22, 23, 45, 46, 47]
+    ]
+  },
+  "edges": [
+    {"start": "switch0", "end": "io_module0", "bandwidth": "25G"},
+    {"start": "switch0", "end": "io_module1", "bandwidth": "25G"}
+  ],
+  "enclosures": {
+    "NVMeEnclosure0": ["io_module0", "io_module1"],
+    "NVMeEnclosure1": ["io_module0", "io_module1"]
+  },
+  "ssd_io_module_mapping": {
+    "range_based": true,
+    "ssds_per_enclosure": 24,
+    "enclosure_io_modules": {
+      "0": ["io_module0"],
+      "1": ["io_module1"]
+    }
+  },
+  "mttf": {
+    "switch": 211310,
+    "io_module": 30960000,
+    "ssd": 0,
+    "NVMeEnclosure": 416666666
+  },
+  "mtr": {
+    "switch": 4,
+    "io_module": 0.25,
+    "ssd": 4,
+    "NVMeEnclosure": 2
+  }
+}

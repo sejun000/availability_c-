@@ -6,6 +6,37 @@
 #include <map>
 #include <stdexcept>
 
+// Encoding entity - who performs the EC encoding
+enum class EncodingEntity {
+    CONTROLLER,  // Controller performs encoding (no cross-IO-module traffic)
+    IO_MODULE    // IO modules perform encoding (requires cross-IO-module traffic for parity)
+};
+
+// Parse encoding entity from string
+EncodingEntity parse_encoding_entity(const std::string& entity_str);
+
+// Convert encoding entity to string
+std::string encoding_entity_to_string(EncodingEntity entity);
+
+// Encoding configuration
+struct EncodingConfig {
+    EncodingEntity entity = EncodingEntity::CONTROLLER;  // Default: controller does encoding
+    double chunk_size = 1024 * 1024;  // Default: 1MB chunks for bandwidth calculation
+
+    // Calculate encoding cross-traffic ratio for write operations
+    // Returns the ratio of cross-IO-module traffic to host write traffic
+    // io_module_count: number of IO modules in the EC stripe
+    // data_chunks: m (number of data chunks)
+    // parity_chunks: k (number of parity chunks)
+    // io_module_data_distribution: map of io_module_name -> number of data chunks on that module
+    double calculate_cross_traffic_ratio(
+        int io_module_count,
+        int data_chunks,
+        int parity_chunks,
+        const std::map<std::string, int>& io_module_data_distribution,
+        const std::map<std::string, int>& io_module_parity_distribution) const;
+};
+
 // Erasure Coding Types
 enum class ECType {
     STANDARD,    // Standard EC: m+k, tolerates k failures

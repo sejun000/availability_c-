@@ -159,6 +159,9 @@ struct SimulationParams {
     // EC configuration
     ECConfig ec_config;
 
+    // Encoding configuration
+    EncodingConfig encoding_config;
+
     // Disk parameters
     int total_disks = 0;
     double disk_capacity = 0;        // Capacity per disk in bytes

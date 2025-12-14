@@ -3,6 +3,63 @@
 #include <cmath>
 #include <iostream>
 
+// Parse encoding entity from string
+EncodingEntity parse_encoding_entity(const std::string& entity_str) {
+    if (entity_str == "controller" || entity_str == "CONTROLLER") {
+        return EncodingEntity::CONTROLLER;
+    } else if (entity_str == "io_module" || entity_str == "IO_MODULE" || entity_str == "iomodule") {
+        return EncodingEntity::IO_MODULE;
+    }
+    return EncodingEntity::CONTROLLER;  // Default
+}
+
+// Convert encoding entity to string
+std::string encoding_entity_to_string(EncodingEntity entity) {
+    switch (entity) {
+        case EncodingEntity::CONTROLLER: return "controller";
+        case EncodingEntity::IO_MODULE: return "io_module";
+    }
+    return "unknown";
+}
+
+// Calculate encoding cross-traffic ratio
+// When IO modules perform encoding, they need to exchange data for parity calculation
+// Each IO module's port bandwidth is consumed by both host traffic and cross-traffic
+//
+// Simple model: cross_ratio = (N-1) where N = number of IO modules
+//
+// Explanation:
+// - Each IO module holds m/N data chunks (assuming uniform distribution)
+// - Each IO module needs all m data chunks for parity calculation
+// - Each IO module must receive m - m/N = m*(N-1)/N chunks from others
+// - Total cross-traffic = N * m*(N-1)/N = m*(N-1) chunks
+// - Host write traffic = m chunks
+// - Cross-traffic ratio = m*(N-1) / m = (N-1)
+//
+// Example: 4+2 EC, 2 IO modules -> ratio = (2-1) = 1.0 (100% overhead)
+// Example: 4+2 EC, 3 IO modules -> ratio = (3-1) = 2.0 (200% overhead)
+// Example: 4+2 EC, 1 IO module  -> ratio = 0 (no cross-traffic)
+double EncodingConfig::calculate_cross_traffic_ratio(
+    int io_module_count,
+    int /* data_chunks */,
+    int parity_chunks,
+    const std::map<std::string, int>& /* io_module_data_distribution */,
+    const std::map<std::string, int>& /* io_module_parity_distribution */) const {
+
+    // If controller does encoding, no cross-traffic
+    if (entity == EncodingEntity::CONTROLLER) {
+        return 0.0;
+    }
+
+    // If only one IO module or no parity, no cross-traffic needed
+    if (io_module_count <= 1 || parity_chunks == 0) {
+        return 0.0;
+    }
+
+    // Cross-traffic ratio = (N-1)
+    return static_cast<double>(io_module_count - 1);
+}
+
 // Calculate combinations C(n, k)
 static double combinations(int n, int k) {
     if (k < 0 || k > n) return 0.0;

@@ -269,6 +269,10 @@ SimulationResult simulation_per_core(
     params.ec_config.local_type = parse_local_type(options.value("local_type", "ec"));
     params.ec_config.validate();
 
+    // Encoding configuration
+    params.encoding_config.entity = parse_encoding_entity(options.value("encoding_entity", "controller"));
+    params.encoding_config.chunk_size = Utils::KMG_to_bytes(options.value("encoding_chunk_size", "1M"));
+
     // Disk parameters
     params.total_disks = params_and_results.at("total_ssds");
     params.disk_capacity = params_and_results.at("capacity");
@@ -407,6 +411,16 @@ SimulationResult simulation_per_core(
     }
 
     disk_io_manager.initialize(disk_io_mappings, params.total_disks, all_io_modules);
+
+    // Apply encoding overhead to baseline max_write if IO module encoding is used
+    // Cross-traffic ratio = (N-1) where N = number of IO modules
+    if (params.encoding_config.entity == EncodingEntity::IO_MODULE && params.ec_config.k > 0) {
+        int io_module_count = static_cast<int>(all_io_modules.size());
+        if (io_module_count > 1) {
+            double cross_ratio = static_cast<double>(io_module_count - 1);
+            max_write_performance_without_any_failure /= (1.0 + cross_ratio);
+        }
+    }
 
     // Simulation parameters (per iteration)
     double simulation_hours = params.simulation_years * 365.0 * 24.0;

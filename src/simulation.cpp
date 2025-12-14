@@ -930,7 +930,32 @@ void calculate_flows_and_speed(
 
     // Host IO on the graph with reservations applied.
     entry.read_bandwidth = std::max(0.0, graph.calculate_max_flow(end_module, start_module, FlowDirection::UPSTREAM));
-    entry.write_bandwidth = std::max(0.0, graph.calculate_max_flow(start_module, end_module, FlowDirection::DOWNSTREAM));
+    double raw_write_bandwidth = std::max(0.0, graph.calculate_max_flow(start_module, end_module, FlowDirection::DOWNSTREAM));
+
+    // Apply encoding overhead for write bandwidth
+    // When IO modules perform encoding, there's cross-IO-module traffic through the switch
+    // Each IO module's port handles both host traffic and cross-traffic from other IO modules
+    //
+    // Cross-traffic ratio = (N-1) where N = number of IO modules
+    // Effective write BW = raw_write_bw / (1 + cross_ratio)
+    if (params.encoding_config.entity == EncodingEntity::IO_MODULE &&
+        disk_io_manager != nullptr && ec_config.k > 0) {
+
+        int io_module_count = static_cast<int>(disk_io_manager->get_all_io_modules().size());
+
+        std::map<std::string, int> dummy_map;
+        double cross_ratio = params.encoding_config.calculate_cross_traffic_ratio(
+            io_module_count, ec_config.m, ec_config.k, dummy_map, dummy_map);
+
+        if (cross_ratio > 0.0) {
+            entry.write_bandwidth = raw_write_bandwidth / (1.0 + cross_ratio);
+        } else {
+            entry.write_bandwidth = raw_write_bandwidth;
+        }
+    } else {
+        entry.write_bandwidth = raw_write_bandwidth;
+    }
+
     entry.data_loss_ratio = total_data_loss;
     entry.groups_with_data_loss = groups_with_data_loss;
 
