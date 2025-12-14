@@ -25,7 +25,7 @@ const std::string DISK_STATE_DATA_LOSS = "data_loss";
 // Event structure for priority queue
 struct Event {
     double time;
-    std::string event_type;  // "fail", "repair", "disconnect", "reconnect"
+    std::string event_type;  // "fail", "repair", "rebuild_complete"
     std::string event_node;
     double prev_time;
     double start_time;
@@ -91,11 +91,16 @@ struct DisconnectedStatus {
 // Flow and speed calculation result
 struct FlowsAndSpeedEntry {
     std::map<int, double> rebuild_bandwidth;  // failure_count -> rebuild_bandwidth
+    std::map<int, double> rebuild_speed_by_disk;  // disk_index -> rebuild_speed (bytes/sec)
     double read_bandwidth = 0.0;              // Available read bandwidth
     double write_bandwidth = 0.0;             // Available write bandwidth
     double availability_ratio = 1.0;          // Current availability (0 if data loss)
     double data_loss_ratio = 0.0;             // Fraction of data lost
-    double performance_ratio = 1.0;           // read_bw / max_read_bw (for perf availability)
+    double performance_ratio_read = 1.0;      // read_bw / max_read_bw_no_failure
+    double performance_ratio_write = 1.0;     // write_bw / max_write_bw_no_failure
+    double performance_ratio_min = 1.0;       // min(read,write) ratio
+    int groups_with_data_loss = 0;            // Number of EC groups with data loss
+    std::vector<int> data_loss_group_indices; // Indices of EC groups with data loss
 
     FlowsAndSpeedEntry() = default;
 };
@@ -115,16 +120,16 @@ struct NodeFailureKey {
 
 struct FailureStateKey {
     NodeFailureKey node_key;
-    std::vector<uint8_t> failure_counts;  // Per EC group failure counts
+    std::vector<uint8_t> disk_state;  // Per disk: 0=normal, 1=unavailable, 2=rebuilding
 
     bool operator<(const FailureStateKey& other) const {
         if (node_key < other.node_key) return true;
         if (other.node_key < node_key) return false;
-        return failure_counts < other.failure_counts;
+        return disk_state < other.disk_state;
     }
 
     bool operator==(const FailureStateKey& other) const {
-        return node_key == other.node_key && failure_counts == other.failure_counts;
+        return node_key == other.node_key && disk_state == other.disk_state;
     }
 };
 
@@ -142,8 +147,8 @@ struct NodeFailureKeyHash {
 struct FailureStateKeyHash {
     size_t operator()(const FailureStateKey& key) const {
         size_t hash = NodeFailureKeyHash{}(key.node_key);
-        for (uint8_t count : key.failure_counts) {
-            hash ^= std::hash<uint8_t>{}(count) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        for (uint8_t state : key.disk_state) {
+            hash ^= std::hash<uint8_t>{}(state) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
         }
         return hash;
     }
@@ -165,6 +170,7 @@ struct SimulationParams {
     // Rebuild parameters
     double rebuild_bw_ratio = 0.2;   // Fraction of bandwidth used for rebuild
     double degraded_ratio = 0.2;     // Fraction of bandwidth for degraded read
+    double data_loss_rebuild_bw = 0; // Fixed rebuild bandwidth during data loss (bytes/sec), 0 = disabled
 
     // Performance availability threshold
     double target_performance_ratio = 0.0;  // If > 0, calculate perf_availability
@@ -175,23 +181,40 @@ struct SimulationParams {
 
     // EC encoding speed (bytes/sec for m+k encoding)
     double ec_encoding_speed = 0;
+
+    // Number of EC groups (for durability calculation)
+    int num_ec_groups = 1;
 };
 
 // Simulation result structure
 struct SimulationResult {
+    int runs = 0;                           // Number of independent simulations aggregated
     double up_time = 0.0;
     double simulation_time = 0.0;
     double availability = 0.0;
-    double perf_up_time = 0.0;              // Time with performance >= target
-    double perf_availability = 0.0;         // Availability based on performance threshold
+    double perf_up_time_read = 0.0;         // Time with read_ratio >= target
+    double perf_up_time_write = 0.0;        // Time with write_ratio >= target
+    double perf_up_time_min = 0.0;          // Time with min(read,write) >= target
+    double perf_availability_read = 0.0;
+    double perf_availability_write = 0.0;
+    double perf_availability_min = 0.0;
     double mttdl = 0.0;                     // Mean time to data loss
     int data_loss_events = 0;               // Number of data loss events
+    int disk_failure_events = 0;            // Total number of disk failures
     double total_data_loss_ratio = 0.0;     // Total fraction of data lost
     double durability = 0.0;                // 1 - (data_loss_ratio per year)
     double time_for_rebuilding = 0.0;
     int count_for_rebuilding = 0;
     double average_read_bandwidth = 0.0;
     double average_write_bandwidth = 0.0;
+    // Rebuild-specific metrics
+    double total_rebuild_speed_time = 0.0;      // Sum of (rebuild_speed * duration)
+    double total_time_in_rebuild = 0.0;         // Total time any disk is rebuilding
+    double total_host_read_bw_during_rebuild = 0.0;   // Sum of (read_bw * duration) during rebuild
+    double total_host_write_bw_during_rebuild = 0.0;  // Sum of (write_bw * duration) during rebuild
+    // Year-based durability metrics
+    int total_group_years = 0;                  // Total EC group-years simulated
+    int group_years_with_data_loss = 0;         // EC group-years that had data loss
 };
 
 // Simulation helper functions
@@ -201,9 +224,9 @@ double calculate_bottleneck_speed(int m, int k, const std::vector<double>& other
 
 // State management
 std::string judge_state_from_failure_info(const ECGroupFailureInfo& failure_info,
-                                          const ECConfig& ec_config);
+                                          const ErasureCodingScheme& ec_scheme);
 
-bool is_data_loss(const ECGroupFailureInfo& failure_info, const ECConfig& ec_config);
+bool is_data_loss(const ECGroupFailureInfo& failure_info, const ErasureCodingScheme& ec_scheme);
 
 // Event management
 void push_failed_event(
@@ -252,9 +275,13 @@ void calculate_flows_and_speed(
     const SimulationParams& params,
     std::unordered_map<FailureStateKey, FlowsAndSpeedEntry, FailureStateKeyHash>& flows_and_speed_table,
     double max_read_performance_without_any_failure,
+    double max_write_performance_without_any_failure,
+    const std::string& start_module,
+    const std::string& end_module,
     const DisconnectedStatus& disconnected,
     const FailureStateKey& key,
-    const DiskIOModuleManager* disk_io_manager = nullptr);
+    const DiskIOModuleManager* disk_io_manager = nullptr,
+    const std::map<int, DiskInfo>* disks = nullptr);
 
 // Disk state update functions
 void update_all_disk_states(
@@ -270,6 +297,7 @@ void update_disk_state(
     std::map<int, DiskInfo>& disks,
     double capacity,
     const std::string& event_type,
+    double event_time,
     double replace_time,
     const ErasureCodingScheme& ec_scheme,
     const DisconnectedStatus& disconnected);
