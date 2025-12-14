@@ -1,0 +1,114 @@
+# spec2 (spec.txt 보강/확정)
+
+이 문서는 `spec.txt`의 요구를 기반으로, 최근 대화에서 확정된 “성능(Performance Availability)·degraded·rebuild·declustered parity” 요구를 정리한 추가 스펙이다.
+`spec.txt`와 함께 적용한다.
+
+---
+
+## 공통(그래프/시뮬레이터 구조)
+
+- 입력: 기존처럼 JSON + CLI 파라미터를 유지한다.
+- 그래프는 양방향(bidirectional)으로 모델링한다.
+  - READ: disk → … → switch/root 방향(UPSTREAM)
+  - WRITE: switch/root → … → disk 방향(DOWNSTREAM)
+- 시뮬레이션은 event-driven이며, `nprocs` 병렬 실행을 유지한다.
+- disk는 동일 타입만 존재하며, 이름은 항상 `disk_*`로 사용한다.
+- disconnect 중에는 rebuild 트래픽이 발생하지 않는다. reconnect 이후에만 rebuild가 진행된다.
+
+---
+
+## 성능 모델(핵심)
+
+### 1) Edge 예약(reservation) 기반 모델
+
+rebuild/degraded로 인한 성능 하락은 “전역 값 차감”이 아니라, **실제 경로의 edge BW를 점유(reserve)**하는 형태로 모델링한다.
+
+- rebuild / degraded flow에 대해 maxflow를 계산하고,
+- 그때 얻은 edge별 유량을 비율(scale)로 줄여서,
+- 해당 edge capacity에서 `reserve_bandwidth()`로 실제로 빼고,
+- 예약이 반영된 그래프에서 다시 host IO maxflow를 계산한다.
+
+즉 “rebuild가 switch를 타느냐 / io_module만 타느냐”에 따라 **점유되는 edge 위치가 달라지고**, 남는 host IO도 달라진다.
+
+### 2) Perf availability 출력(READ/WRITE/MIN)
+
+host IO는 READ/WRITE를 분리해 계산한다.
+
+- `host_read_bw`: io_module → root maxflow (UPSTREAM)
+- `host_write_bw`: root → io_module maxflow (DOWNSTREAM)
+- `perf_ratio_read = host_read_bw / host_read_bw_no_failure`
+- `perf_ratio_write = host_write_bw / host_write_bw_no_failure`
+- `perf_ratio_min = min(perf_ratio_read, perf_ratio_write)`
+
+`--target_perf`가 주어지면 아래 3개를 각각 계산/출력/CSV에 포함한다.
+
+- `perf_availability_read`
+- `perf_availability_write`
+- `perf_availability_min`
+
+---
+
+## Degraded read (workload=100%)
+
+- workload는 100% 요청이 있다고 가정한다.
+- degraded read는 `degraded_ratio`만큼의 비율로 존재한다고 모델링한다.
+- degraded read 트래픽은 **READ 방향(UPSTREAM)** edge를 점유(reserve)해서 host READ BW를 감소시킨다.
+
+### declustered parity relief 비율 r
+
+`m+k < n` 형태(혹은 LRC의 경우 `m+k+local_k*(m/local_m) < n`)에서는 declustered parity로 인해
+“실제로 degraded가 필요 없는” 확률이 존재한다. 이를 `r`이라 한다.
+
+- `r = C(n-x, S) / C(n, S)`
+  - `n`: group size
+  - `x`: 해당 그룹의 unavailable 개수(= failed + disconnected)
+  - `S`: stripe width (scheme별 정의)
+    - STANDARD: `S = m + k`
+    - LRC: `S = m + k + local_k * (m/local_m)`
+
+degraded/read와 rebuild는 이 비율을 반영하여 **(1-r) 비율로만** 발생/점유하도록 한다.
+
+---
+
+## Rebuild
+
+### rebuild source 수(기본)
+
+rebuild source는 “m개”가 아니라, 기본적으로 `n-k`로 모델링한다.
+
+- STANDARD: `required_reads = n - k`
+  - `n == m+k`이면 기존과 동일하게 `m`과 같아진다.
+
+### LRC
+
+- local rebuild 가능하면 `local_m`로 먼저 복구한다.
+- local rebuild 불가 시 global rebuild로 전환하며 source는 `n-k`로 복구한다.
+
+### MULTI_EC
+
+multi-ec는 local stripe(=local level)를 하나의 chunk로 보고 outer erasure coding을 구성한다.
+
+- local rebuild 가능하면 `local_m`로 먼저 복구한다.
+- local rebuild 불가 시 outer(global) rebuild로 전환한다.
+- outer rebuild 시 “다른 local stripe 전체를 동시에 읽지 않는다”는 근사로,
+  **다른 local stripe들에서 disk 1개씩(대표 disk)만 골라서** `n-k`개의 source를 구성한다.
+
+### MULTI_EC의 declustered r (outer/local 모두 반영)
+
+multi-ec에서 declustered relief는 outer/local 두 레벨에 대해 r을 계산하고 결합한다.
+
+- local r: 각 local stripe group에 대해 `r_local = C(local_n - x_local, local_m+local_k) / C(local_n, local_m+local_k)`
+- outer r: outer stripe에 대해 `r_outer = C(n - x_chunks, (m+k)) / C(n, (m+k))`
+  - `x_chunks`: local_k를 초과해 “chunk failure”로 간주되는 local stripe 개수
+
+결합: `r_total = r_outer * avg(r_local)` (avg는 stripe별 평균)
+그리고 impact는 `1 - r_total`로 적용한다.
+
+---
+
+## Disconnect
+
+- disconnect 중에는 rebuild를 하지 않는다.
+- reconnect 시점에 “disconnect duration에 비례하는 missing data”가 존재한다고 보고,
+  reconnect 이후부터 rebuild 트래픽이 발생하도록 한다.
+

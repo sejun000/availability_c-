@@ -1353,9 +1353,19 @@ void monte_carlo_simulation(
     // Year-based durability metrics
     int total_group_years = 0;
     int total_group_years_with_data_loss = 0;
+    // Baseline performance (same for all threads, capture from first result)
+    double max_read_performance = 0.0;
+    double max_write_performance = 0.0;
+    bool baseline_captured = false;
 
     for (auto& future : futures) {
         SimulationResult result = future.get();
+        // Capture baseline from first result
+        if (!baseline_captured) {
+            max_read_performance = result.max_read_performance;
+            max_write_performance = result.max_write_performance;
+            baseline_captured = true;
+        }
         total_runs += result.runs;
         total_up_time += result.up_time;
         total_simulation_time += result.simulation_time;
@@ -1445,6 +1455,8 @@ void monte_carlo_simulation(
 
     params_and_results["avg_read_bandwidth"] = total_read_bw / total_runs;
     params_and_results["avg_write_bandwidth"] = total_write_bw / total_runs;
+    params_and_results["max_read_performance"] = max_read_performance;
+    params_and_results["max_write_performance"] = max_write_performance;
 
     // Rebuild-specific metrics
     if (total_time_in_rebuild > 0) {

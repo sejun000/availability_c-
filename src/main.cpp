@@ -152,6 +152,11 @@ int main(int argc, char* argv[]) {
     double read_bw = args.qlc ? qlc_read_bw : tlc_read_bw;
     double dwpd_limit = args.qlc ? qlc_dwpd : tlc_dwpd;
 
+    // Override args with config file values if not specified via CLI
+    if (args.target_performance_ratio == 0.0) {
+        args.target_performance_ratio = options.value("target_performance_ratio", 0.0);
+    }
+
     // Set default n if not specified
     if (args.n == 0) {
         args.n = args.m + args.k;
@@ -288,6 +293,24 @@ int main(int argc, char* argv[]) {
     if (params_and_results.find("avg_host_write_bw_during_rebuild") != params_and_results.end()) {
         double avg_write_bw = params_and_results["avg_host_write_bw_during_rebuild"].get<double>();
         std::cout << "  Avg host WRITE BW during rebuild: " << (avg_write_bw / 1e9) << " GB/s" << std::endl;
+    }
+    // Baseline (max) performance
+    if (params_and_results.find("max_read_performance") != params_and_results.end()) {
+        double max_read = params_and_results["max_read_performance"].get<double>();
+        std::cout << "  Baseline max READ BW: " << (max_read / 1e9) << " GB/s" << std::endl;
+    }
+    if (params_and_results.find("max_write_performance") != params_and_results.end()) {
+        double max_write = params_and_results["max_write_performance"].get<double>();
+        std::cout << "  Baseline max WRITE BW: " << (max_write / 1e9) << " GB/s" << std::endl;
+    }
+    // Average bandwidth (overall, including non-rebuild time)
+    if (params_and_results.find("avg_read_bandwidth") != params_and_results.end()) {
+        double avg_read = params_and_results["avg_read_bandwidth"].get<double>();
+        std::cout << "  Avg READ BW (overall): " << (avg_read / 1e9) << " GB/s" << std::endl;
+    }
+    if (params_and_results.find("avg_write_bandwidth") != params_and_results.end()) {
+        double avg_write = params_and_results["avg_write_bandwidth"].get<double>();
+        std::cout << "  Avg WRITE BW (overall): " << (avg_write / 1e9) << " GB/s" << std::endl;
     }
 
     // Performance availability (if target_perf specified)

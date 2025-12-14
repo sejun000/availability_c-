@@ -427,6 +427,8 @@ SimulationResult simulation_per_core(
 
     SimulationResult aggregated;
     aggregated.runs = num_iterations;
+    aggregated.max_read_performance = max_read_performance_without_any_failure;
+    aggregated.max_write_performance = max_write_performance_without_any_failure;
 
     int percentage = 1;
     if (simulation_idx == 0) {

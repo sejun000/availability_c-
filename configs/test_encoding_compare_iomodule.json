@@ -12,7 +12,8 @@
     "ssd_arr": 0.0327,
     "ec_type": "standard",
     "n": 6,
-    "encoding_entity": "io_module"
+    "encoding_entity": "io_module",
+    "target_performance_ratio": 0.99
   },
   "edges": [
     {"start": "switch0", "end": "io_module0", "bandwidth": "25G"},

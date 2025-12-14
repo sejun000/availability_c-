@@ -218,6 +218,9 @@ struct SimulationResult {
     // Year-based durability metrics
     int total_group_years = 0;                  // Total EC group-years simulated
     int group_years_with_data_loss = 0;         // EC group-years that had data loss
+    // Baseline performance (max without failures)
+    double max_read_performance = 0.0;          // Max read BW without any failure
+    double max_write_performance = 0.0;         // Max write BW without any failure (with encoding overhead if applicable)
 };
 
 // Simulation helper functions
