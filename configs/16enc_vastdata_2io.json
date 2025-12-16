@@ -9,7 +9,11 @@
     "simulation_years": 5,
     "tlc_read_bw": "7G",
     "tlc_write_bw": "4G",
-    "ssd_arr": 0.0327
+    "ssd_arr": 0.0327,
+    "io_module_software_fault_ratio": 0.9,
+    "io_module_hardware_mtr": 4,
+    "controller_software_fault_ratio": 0.9,
+    "controller_hardware_mtr": 4
   },
   "edges": [
     {"start": "switch0", "end": "controller0", "bandwidth": "100G"},

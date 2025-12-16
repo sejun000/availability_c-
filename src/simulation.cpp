@@ -147,17 +147,27 @@ void push_repair_event(std::priority_queue<Event, std::vector<Event>, std::great
         double mtr = mtr_it->second;
         bool is_hardware_fault = false;
 
-        // Check if this is io_module and apply software/hardware fault distinction
-        if (module.find("io_module") != std::string::npos && options != nullptr) {
-            double software_fault_ratio = options->value("io_module_software_fault_ratio", 1.0);
-            double hardware_mtr = options->value("io_module_hardware_mtr", mtr);
+        // Check if this is io_module or controller and apply software/hardware fault distinction
+        if (options != nullptr) {
+            double software_fault_ratio = 1.0;
+            double hardware_mtr = mtr;
 
-            std::uniform_real_distribution<double> uniform(0.0, 1.0);
-            double rand_val = uniform(rng);
+            if (module.find("io_module") != std::string::npos) {
+                software_fault_ratio = options->value("io_module_software_fault_ratio", 1.0);
+                hardware_mtr = options->value("io_module_hardware_mtr", mtr);
+            } else if (module.find("controller") != std::string::npos) {
+                software_fault_ratio = options->value("controller_software_fault_ratio", 1.0);
+                hardware_mtr = options->value("controller_hardware_mtr", mtr);
+            }
 
-            if (rand_val >= software_fault_ratio) {
-                mtr = hardware_mtr;
-                is_hardware_fault = true;
+            if (software_fault_ratio < 1.0) {
+                std::uniform_real_distribution<double> uniform(0.0, 1.0);
+                double rand_val = uniform(rng);
+
+                if (rand_val >= software_fault_ratio) {
+                    mtr = hardware_mtr;
+                    is_hardware_fault = true;
+                }
             }
         }
 

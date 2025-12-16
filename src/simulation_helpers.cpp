@@ -2,6 +2,7 @@
 #include "logger.hpp"
 #include <algorithm>
 #include <iostream>
+#include <set>
 
 // Build node failure key from current state
 NodeFailureKey build_node_failure_key(
@@ -55,6 +56,30 @@ FailureStateKey build_failure_state_key(
     return key;
 }
 
+// Helper function to recursively disable nodes in nested enclosures
+void disable_enclosure_recursively(
+    const std::string& enclosure_name,
+    const std::map<std::string, std::vector<std::string>>& enclosure_to_node_map,
+    GraphStructure& graph_copy,
+    std::set<std::string>& visited) {
+
+    // Prevent infinite recursion
+    if (visited.count(enclosure_name)) return;
+    visited.insert(enclosure_name);
+
+    auto encl_it = enclosure_to_node_map.find(enclosure_name);
+    if (encl_it == enclosure_to_node_map.end()) return;
+
+    for (const auto& enclosed_node : encl_it->second) {
+        graph_copy.disable_node(enclosed_node);
+
+        // Check if this node is also an enclosure (nested enclosure)
+        if (enclosure_to_node_map.find(enclosed_node) != enclosure_to_node_map.end()) {
+            disable_enclosure_recursively(enclosed_node, enclosure_to_node_map, graph_copy, visited);
+        }
+    }
+}
+
 // Calculate hardware graph with failures applied
 void calculate_hardware_graph(
     const GraphStructure& hardware_graph,
@@ -82,13 +107,9 @@ void calculate_hardware_graph(
         if (failed) {
             graph_copy.disable_node(node);
 
-            // Also disable nodes in enclosures
-            auto encl_it = enclosure_to_node_map.find(node);
-            if (encl_it != enclosure_to_node_map.end()) {
-                for (const auto& enclosed_node : encl_it->second) {
-                    graph_copy.disable_node(enclosed_node);
-                }
-            }
+            // Also disable nodes in enclosures (recursively for nested enclosures)
+            std::set<std::string> visited;
+            disable_enclosure_recursively(node, enclosure_to_node_map, graph_copy, visited);
         }
     }
 
