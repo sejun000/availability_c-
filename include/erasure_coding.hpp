@@ -204,7 +204,8 @@ public:
     // Get the disk group size
     int get_group_size() const {
         if (config_.type == ECType::MULTI_EC) {
-            return config_.total_disks;
+            // For Multi-EC, each ec_group is a local stripe with local_n disks
+            return config_.local_n;
         }
         return config_.n > 0 ? config_.n : config_.m + config_.k;
     }

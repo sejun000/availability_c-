@@ -235,7 +235,8 @@ double ECConfig::calculate_data_loss(const std::set<int>& failed_disk_indices) c
                 }
             } else {
                 // Local layer uses EC (original behavior)
-                int local_stripe_size = local_m + local_k;
+                // Each local stripe has local_n disks (enclosure size)
+                int local_stripe_size = local_n;
 
                 // Count failed local stripes (stripes with more than local_k failures)
                 std::vector<int> stripe_failures(num_local_groups, 0);
@@ -325,7 +326,8 @@ int ECConfig::get_rebuild_read_disk_count(const std::set<int>& failed_disk_indic
                 return std::max(0, n - k);
             } else {
                 // Local layer uses EC (original behavior)
-                int local_stripe_size = local_m + local_k;
+                // Each local stripe has local_n disks (enclosure size)
+                int local_stripe_size = local_n;
                 int stripe_idx = target_disk / local_stripe_size;
                 int stripe_start = stripe_idx * local_stripe_size;
                 int stripe_end = stripe_start + local_stripe_size;
@@ -543,7 +545,8 @@ bool ErasureCodingScheme::can_local_rebuild(const std::set<int>& failed_disks, i
             return group_failures < config_.local_n;  // At least one copy survives
         } else {
             // Local layer uses EC (original behavior)
-            int local_stripe_size = config_.local_m + config_.local_k;
+            // Each local stripe has local_n disks (enclosure size)
+            int local_stripe_size = config_.local_n;
             int stripe_idx = relative_target / local_stripe_size;
             int stripe_start = stripe_idx * local_stripe_size;
             int stripe_end = stripe_start + local_stripe_size;

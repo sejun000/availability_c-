@@ -436,7 +436,18 @@ SimulationResult simulation_per_core(
         Utils::progress_bar(percentage, 100, 50);
     }
 
+    // Get seed from options (0 = use random_device, handled at thread start)
+    uint64_t base_seed = options.value("seed", static_cast<uint64_t>(0));
+    int total_simulations = options.value("num_simulations", 10000);
+    int base_iter_offset = (total_simulations / params.nprocs) * simulation_idx;
+
     for (int iter = 0; iter < num_iterations; ++iter) {
+        // Seed RNG for reproducibility if base_seed > 0
+        if (base_seed > 0) {
+            uint64_t iter_seed = base_seed + static_cast<uint64_t>(base_iter_offset + iter);
+            seed_rng(iter_seed);
+        }
+
         // Initialize state (fresh, independent simulation)
         SimulationState state = initialize_simulation_state(params, hardware_graph, ec_scheme,
                                                             node_to_module_map, disk_io_manager,

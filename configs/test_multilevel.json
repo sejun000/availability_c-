@@ -1,0 +1,68 @@
+{
+  "options": {
+    "start_module": "controller",
+    "end_module": "io_module",
+    "lowest_common_module": "controller",
+    "highest_local_module": "io_module",
+    "prep_time_for_rebuilding": 4,
+    "rebuild_bw_ratio": 0.2,
+    "simulation_years": 1,
+    "tlc_read_bw": "7G",
+    "tlc_write_bw": "4G",
+    "ssd_arr": 0.0327,
+    "ec_type": "standard",
+    "n": 16,
+    "encoding_entity": "io_module",
+    "encoding_chunk_size": "1M"
+  },
+  "edges": [
+    {"start": "controller0", "end": "switch0", "bandwidth": "50G"},
+    {"start": "controller0", "end": "switch1", "bandwidth": "50G"},
+    {"start": "switch0", "end": "io_module0", "bandwidth": "25G"},
+    {"start": "switch0", "end": "io_module1", "bandwidth": "25G"},
+    {"start": "switch0", "end": "io_module2", "bandwidth": "25G"},
+    {"start": "switch0", "end": "io_module3", "bandwidth": "25G"},
+    {"start": "switch1", "end": "io_module4", "bandwidth": "25G"},
+    {"start": "switch1", "end": "io_module5", "bandwidth": "25G"},
+    {"start": "switch1", "end": "io_module6", "bandwidth": "25G"},
+    {"start": "switch1", "end": "io_module7", "bandwidth": "25G"}
+  ],
+  "enclosures": {
+    "NVMeEnclosure0": ["io_module0"],
+    "NVMeEnclosure1": ["io_module1"],
+    "NVMeEnclosure2": ["io_module2"],
+    "NVMeEnclosure3": ["io_module3"],
+    "NVMeEnclosure4": ["io_module4"],
+    "NVMeEnclosure5": ["io_module5"],
+    "NVMeEnclosure6": ["io_module6"],
+    "NVMeEnclosure7": ["io_module7"]
+  },
+  "ssd_io_module_mapping": {
+    "range_based": true,
+    "ssds_per_enclosure": 24,
+    "enclosure_io_modules": {
+      "0": ["io_module0"],
+      "1": ["io_module1"],
+      "2": ["io_module2"],
+      "3": ["io_module3"],
+      "4": ["io_module4"],
+      "5": ["io_module5"],
+      "6": ["io_module6"],
+      "7": ["io_module7"]
+    }
+  },
+  "mttf": {
+    "controller": 500000,
+    "switch": 500000,
+    "io_module": 500000,
+    "ssd": 0,
+    "NVMeEnclosure": 500000000
+  },
+  "mtr": {
+    "controller": 4,
+    "switch": 4,
+    "io_module": 0.5,
+    "ssd": 4,
+    "NVMeEnclosure": 2
+  }
+}

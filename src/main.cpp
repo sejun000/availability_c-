@@ -35,6 +35,7 @@ struct Arguments {
     int simulation_years = 10;     // Virtual years per simulation
     bool no_result = false;
     bool verbose = false;
+    uint64_t seed = 0;  // Random seed (0 = use random_device)
 };
 
 void print_usage() {
@@ -62,6 +63,7 @@ void print_usage() {
     std::cerr << "  --data_loss_rebuild_bw <string>  Fixed rebuild BW during data loss (default: 100M)" << std::endl;
     std::cerr << "  --num_sim <int>           Number of Monte Carlo iterations (default: 200000)" << std::endl;
     std::cerr << "  --sim_years <int>         Virtual years per simulation (default: 10)" << std::endl;
+    std::cerr << "  --seed <uint64>           Random seed for reproducibility (default: 0 = random)" << std::endl;
     std::cerr << "  --no_result               Don't write results to file" << std::endl;
     std::cerr << "  --verbose                 Enable verbose logging" << std::endl;
     std::cerr << std::endl;
@@ -100,6 +102,7 @@ Arguments parse_arguments(int argc, char* argv[]) {
         else if (arg == "--data_loss_rebuild_bw" && i + 1 < argc) args.data_loss_rebuild_bw_str = argv[++i];
         else if (arg == "--num_sim" && i + 1 < argc) args.num_simulations = std::stoi(argv[++i]);
         else if (arg == "--sim_years" && i + 1 < argc) args.simulation_years = std::stoi(argv[++i]);
+        else if (arg == "--seed" && i + 1 < argc) args.seed = std::stoull(argv[++i]);
         else if (arg == "--no_result") args.no_result = true;
         else if (arg == "--verbose") args.verbose = true;
         else if (arg[0] != '-') {
@@ -229,6 +232,8 @@ int main(int argc, char* argv[]) {
     options["target_performance_ratio"] = args.target_performance_ratio;
     options["data_loss_rebuild_bw"] = Utils::KMG_to_bytes(args.data_loss_rebuild_bw_str);
     options["simulation_years"] = args.simulation_years;
+    options["seed"] = args.seed;
+    options["num_simulations"] = args.num_simulations;
 
     // Set disk failure trace file (CLI overrides JSON config)
     if (!args.disk_failure_trace.empty()) {

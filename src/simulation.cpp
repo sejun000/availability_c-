@@ -86,6 +86,11 @@ std::string judge_state_from_failure_info(const ECGroupFailureInfo& failure_info
 // Random number generator (thread-local)
 thread_local std::mt19937 rng(std::random_device{}());
 
+// Seed the thread-local RNG for reproducibility
+void seed_rng(uint64_t seed) {
+    rng.seed(static_cast<std::mt19937::result_type>(seed));
+}
+
 // Push failure event to priority queue
 void push_failed_event(std::priority_queue<Event, std::vector<Event>, std::greater<Event>>& failed_events,
                        const std::string& event_node,
@@ -930,30 +935,92 @@ void calculate_flows_and_speed(
 
     // Host IO on the graph with reservations applied.
     entry.read_bandwidth = std::max(0.0, graph.calculate_max_flow(end_module, start_module, FlowDirection::UPSTREAM));
-    double raw_write_bandwidth = std::max(0.0, graph.calculate_max_flow(start_module, end_module, FlowDirection::DOWNSTREAM));
 
-    // Apply encoding overhead for write bandwidth
-    // When IO modules perform encoding, there's cross-IO-module traffic through the switch
-    // Each IO module's port handles both host traffic and cross-traffic from other IO modules
-    //
-    // Cross-traffic ratio = (N-1) where N = number of IO modules
-    // Effective write BW = raw_write_bw / (1 + cross_ratio)
+    // Apply encoding overhead for write bandwidth using LCA-based cross-traffic calculation
+    // When IO modules perform encoding, cross-traffic flows through LCA paths between IO module pairs
     if (params.encoding_config.entity == EncodingEntity::IO_MODULE &&
         disk_io_manager != nullptr && ec_config.k > 0) {
 
-        int io_module_count = static_cast<int>(disk_io_manager->get_all_io_modules().size());
+        auto io_module_set = disk_io_manager->get_all_io_modules();
+        std::vector<std::string> all_io_modules(io_module_set.begin(), io_module_set.end());
+        int N = static_cast<int>(all_io_modules.size());
 
-        std::map<std::string, int> dummy_map;
-        double cross_ratio = params.encoding_config.calculate_cross_traffic_ratio(
-            io_module_count, ec_config.m, ec_config.k, dummy_map, dummy_map);
+        if (N > 1) {
+            // Calculate cross-traffic factor per edge
+            // Each IO module pair exchanges data through their LCA path
+            // Cross-traffic per pair = 2 / N^2 (bidirectional, per unit host write)
+            std::map<std::pair<std::string, std::string>, double> edge_cross_factor;
 
-        if (cross_ratio > 0.0) {
-            entry.write_bandwidth = raw_write_bandwidth / (1.0 + cross_ratio);
+            for (size_t i = 0; i < all_io_modules.size(); ++i) {
+                for (size_t j = i + 1; j < all_io_modules.size(); ++j) {
+                    const std::string& io_i = all_io_modules[i];
+                    const std::string& io_j = all_io_modules[j];
+
+                    // Find LCA of this pair
+                    std::string lca = graph.find_lca(io_i, io_j);
+                    if (lca.empty()) continue;
+
+                    // Get paths from each IO module to root
+                    auto path_i = graph.get_path_to_root(io_i);
+                    auto path_j = graph.get_path_to_root(io_j);
+
+                    // Cross-traffic amount per pair per unit host write
+                    // Each module holds 1/N of data, sends (1/N) to each of (N-1) others
+                    // Per pair per direction = 1/N^2, bidirectional = 2/N^2
+                    double cross_per_pair = 2.0 / (N * N);
+
+                    // Add factor to edges on path io_i -> lca
+                    for (size_t k = 0; k + 1 < path_i.size(); ++k) {
+                        if (path_i[k] == lca) break;
+                        // Edge: path_i[k] <-> path_i[k+1] (both directions for cross-traffic)
+                        edge_cross_factor[{path_i[k+1], path_i[k]}] += cross_per_pair;
+                        edge_cross_factor[{path_i[k], path_i[k+1]}] += cross_per_pair;
+                    }
+                    // Add factor to edges on path io_j -> lca
+                    for (size_t k = 0; k + 1 < path_j.size(); ++k) {
+                        if (path_j[k] == lca) break;
+                        edge_cross_factor[{path_j[k+1], path_j[k]}] += cross_per_pair;
+                        edge_cross_factor[{path_j[k], path_j[k+1]}] += cross_per_pair;
+                    }
+                }
+            }
+
+            // Debug: log cross-traffic factors
+            static int cross_log_count = 0;
+            if (cross_log_count < 1) {
+                std::cerr << "[CROSS-TRAFFIC] N=" << N << " pairs=" << edge_cross_factor.size() << std::endl;
+                for (const auto& [edge, factor] : edge_cross_factor) {
+                    std::cerr << "  " << edge.first << " -> " << edge.second << " factor=" << factor << std::endl;
+                }
+                cross_log_count++;
+            }
+
+            // Calculate write bandwidth with cross-traffic overhead
+            // For edges with cross-traffic, effective capacity = capacity / (1 + factor)
+            // We clone the graph and adjust capacities
+            GraphStructure write_graph = graph.clone();
+            for (const auto& [edge, factor] : edge_cross_factor) {
+                if (factor > 0) {
+                    // Reduce both upstream and downstream capacity
+                    double current_up = write_graph.get_edge_capacity(edge.first, edge.second, FlowDirection::UPSTREAM);
+                    double current_down = write_graph.get_edge_capacity(edge.first, edge.second, FlowDirection::DOWNSTREAM);
+                    if (current_up > 0) {
+                        write_graph.reserve_bandwidth(edge.first, edge.second,
+                            current_up * factor / (1.0 + factor), FlowDirection::UPSTREAM);
+                    }
+                    if (current_down > 0) {
+                        write_graph.reserve_bandwidth(edge.first, edge.second,
+                            current_down * factor / (1.0 + factor), FlowDirection::DOWNSTREAM);
+                    }
+                }
+            }
+            entry.write_bandwidth = std::max(0.0, write_graph.calculate_max_flow(start_module, end_module, FlowDirection::DOWNSTREAM));
         } else {
-            entry.write_bandwidth = raw_write_bandwidth;
+            // Single IO module - no cross-traffic
+            entry.write_bandwidth = std::max(0.0, graph.calculate_max_flow(start_module, end_module, FlowDirection::DOWNSTREAM));
         }
     } else {
-        entry.write_bandwidth = raw_write_bandwidth;
+        entry.write_bandwidth = std::max(0.0, graph.calculate_max_flow(start_module, end_module, FlowDirection::DOWNSTREAM));
     }
 
     entry.data_loss_ratio = total_data_loss;
@@ -1056,6 +1123,10 @@ void calculate_flows_and_speed(
     } else {
         entry.performance_ratio_write = 1.0;
     }
+
+    // Data loss인 그룹은 해당 비율만큼 performance도 감소 (perf_availability <= availability 보장)
+    entry.performance_ratio_read = std::min(entry.performance_ratio_read, entry.availability_ratio);
+    entry.performance_ratio_write = std::min(entry.performance_ratio_write, entry.availability_ratio);
 
     entry.performance_ratio_min = std::min(entry.performance_ratio_read, entry.performance_ratio_write);
 

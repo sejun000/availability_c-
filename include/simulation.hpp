@@ -223,6 +223,9 @@ struct SimulationResult {
     double max_write_performance = 0.0;         // Max write BW without any failure (with encoding overhead if applicable)
 };
 
+// Random number generator seeding
+void seed_rng(uint64_t seed);
+
 // Simulation helper functions
 double pfail(int m, int k, int l, int x);
 double calculate_bottleneck_speed(int m, int k, const std::vector<double>& other_bws,
