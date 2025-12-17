@@ -9,6 +9,7 @@
 #include <future>
 #include <random>
 #include <fstream>
+#include <iomanip>
 
 // Calculate probability of stripe failure under x device failures
 double pfail(int m, int k, int l, int x) {
@@ -213,6 +214,23 @@ void push_repair_event(std::priority_queue<Event, std::vector<Event>, std::great
         if (module.find("io_module") != std::string::npos && options != nullptr) {
             double software_fault_ratio = options->value("io_module_software_fault_ratio", 1.0);
             double hardware_mtr = options->value("io_module_hardware_mtr", mtr);
+
+            // Determine if this is a hardware fault (permanent) or software fault (transient)
+            std::uniform_real_distribution<double> uniform(0.0, 1.0);
+            double rand_val = uniform(rng);
+
+            if (rand_val >= software_fault_ratio) {
+                // Hardware fault: use longer repair time
+                mtr = hardware_mtr;
+                is_hardware_fault = true;
+            }
+            // else: Software fault: use default (shorter) repair time
+        }
+
+        // Check if this is host_module (controller) and apply software/hardware fault distinction
+        if (module.find("host_module") != std::string::npos && options != nullptr) {
+            double software_fault_ratio = options->value("controller_software_fault_ratio", 1.0);
+            double hardware_mtr = options->value("controller_hardware_mtr", mtr);
 
             // Determine if this is a hardware fault (permanent) or software fault (transient)
             std::uniform_real_distribution<double> uniform(0.0, 1.0);
@@ -1260,6 +1278,46 @@ void monte_carlo_simulation(
             avail_out << uncached_availability << "\n";
             avail_out << cached_availability << "\n";
             avail_out.close();
+        }
+    }
+
+    // Credit availability sweep: calculate for all targets (0.40~0.99) and output to CSV
+    if (options.contains("credit_availability_sweep_csv")) {
+        std::string csv_path = options["credit_availability_sweep_csv"].get<std::string>();
+        std::ofstream csv_out(csv_path);
+        if (csv_out.is_open()) {
+            csv_out << "target_perf_ratio,credit_availability,credit_avail_nines\n";
+
+            // Calculate total time from effective_availabilities
+            double total_eff_time = 0.0;
+            for (const auto& [eff_avail, time] : total_effective_availabilities) {
+                total_eff_time += time;
+            }
+
+            // For each target from 0.40 to 0.99 with step 0.01
+            for (int target_pct = 40; target_pct <= 99; target_pct++) {
+                double target = target_pct / 100.0;
+                double credit_up_time_sweep = 0.0;
+
+                for (const auto& [eff_avail, time] : total_effective_availabilities) {
+                    double credit_ratio;
+                    if (eff_avail >= target) {
+                        credit_ratio = 1.0;
+                    } else {
+                        credit_ratio = eff_avail / target;
+                    }
+                    // Also consider data loss (eff_avail = 0 means data loss)
+                    credit_ratio = std::min(credit_ratio, eff_avail > 0 ? 1.0 : 0.0);
+                    credit_up_time_sweep += time * credit_ratio;
+                }
+
+                double credit_avail_sweep = credit_up_time_sweep / total_eff_time;
+                csv_out << std::fixed << std::setprecision(2) << target << ","
+                        << std::setprecision(15) << credit_avail_sweep << ","
+                        << std::setprecision(6) << Utils::get_nines(credit_avail_sweep) << "\n";
+            }
+            csv_out.close();
+            Logger::getInstance().info("Credit availability sweep results written to: " + csv_path);
         }
     }
 

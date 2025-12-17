@@ -41,6 +41,7 @@ struct Arguments {
     double rebuild_bw_ratio = 0.2;
     bool no_result = false;
     double target_perf_ratio = 0.8;
+    std::string credit_availability_sweep_csv = "";
     bool single_port_ssd = false;
     bool active_active = false;
     bool verbose = false;
@@ -79,6 +80,7 @@ Arguments parse_arguments(int argc, char* argv[]) {
         else if (arg == "--rebuild_bw_ratio" && i + 1 < argc) args.rebuild_bw_ratio = std::stod(argv[++i]);
         else if (arg == "--no_result") args.no_result = true;
         else if (arg == "--target_perf_ratio" && i + 1 < argc) args.target_perf_ratio = std::stod(argv[++i]);
+        else if (arg == "--credit_availability_sweep_csv" && i + 1 < argc) args.credit_availability_sweep_csv = argv[++i];
         else if (arg == "--single_port_ssd") args.single_port_ssd = true;
         else if (arg == "--active_active") args.active_active = true;
         else if (arg == "--verbose") args.verbose = true;
@@ -113,6 +115,7 @@ Arguments parse_arguments(int argc, char* argv[]) {
             std::cerr << "  --rebuild_bw_ratio <double>" << std::endl;
             std::cerr << "  --no_result               Don't write results" << std::endl;
             std::cerr << "  --target_perf_ratio <double>" << std::endl;
+            std::cerr << "  --credit_availability_sweep_csv <path>  Output credit availability for all targets" << std::endl;
             std::cerr << "  --single_port_ssd         Single port SSD mode" << std::endl;
             std::cerr << "  --active_active           Active-active mode" << std::endl;
             std::cerr << "  --verbose                 Enable verbose logging" << std::endl;
@@ -250,6 +253,11 @@ int main(int argc, char* argv[]) {
     // Set SSD failure trace file (CLI overrides JSON config)
     if (!args.ssd_failure_trace.empty()) {
         options["ssd_failure_trace"] = args.ssd_failure_trace;
+    }
+
+    // Set credit availability sweep CSV output
+    if (!args.credit_availability_sweep_csv.empty()) {
+        options["credit_availability_sweep_csv"] = args.credit_availability_sweep_csv;
     }
 
     // Run simulation
