@@ -105,10 +105,11 @@ struct FlowsAndSpeedEntry {
     AvailabilityRatio availability_ratio;
     double eff_availability_ratio;
     double credit_availability_ratio;
+    double credit2_availability_ratio;  // Binary: 0 if below target, 1 otherwise
 
     FlowsAndSpeedEntry() : backup_rebuild_speed(0), cached_backup_rebuild_speed(0),
                            up_first_group(1), eff_availability_ratio(1.0),
-                           credit_availability_ratio(1.0) {}
+                           credit_availability_ratio(1.0), credit2_availability_ratio(1.0) {}
 };
 
 // Key structures for caching
@@ -165,6 +166,10 @@ struct NetworkAvailabilityTable {
     std::map<int, double> availability;
     std::map<int, double> cached_availability;
 };
+
+// Random number generator seeding
+void seed_rng(uint64_t seed, int thread_id);
+void ensure_rng_initialized();
 
 // Simulation helper functions
 double pfail(int m, int k, int l, int x);
@@ -233,7 +238,8 @@ void push_failed_event(
     const GraphStructure& hardware_graph,
     const SSDRedundancyScheme& ssd_redun_scheme,
     const EmpiricalCDF* ssd_failure_cdf = nullptr,
-    double ssd_arr = 0.0);
+    double ssd_arr_qlc = 0.0,
+    double ssd_arr_tlc = 0.0);
 
 void push_repair_event(
     std::priority_queue<Event, std::vector<Event>, std::greater<Event>>& repair_events,
@@ -254,7 +260,8 @@ std::priority_queue<Event, std::vector<Event>, std::greater<Event>> generate_fir
     int ssd_total_count,
     const SSDRedundancyScheme& ssd_redun_scheme,
     const EmpiricalCDF* ssd_failure_cdf = nullptr,
-    double ssd_arr = 0.0);
+    double ssd_arr_qlc = 0.0,
+    double ssd_arr_tlc = 0.0);
 
 void update_failure_info(
     const std::string& event_type,

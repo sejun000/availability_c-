@@ -1,12 +1,40 @@
 #include <iostream>
 #include <string>
 #include <map>
+#include <csignal>
+#include <boost/stacktrace.hpp>
 #include <nlohmann/json.hpp>
 #include "utils.hpp"
 #include "graph_structure.hpp"
 #include "ssd.hpp"
 #include "simulation.hpp"
 #include "logger.hpp"
+
+// Signal handler for segfault backtrace with line numbers
+void signal_handler(int sig) {
+    std::cerr << "\n========================================" << std::endl;
+    std::cerr << "ERROR: Received signal " << sig << std::endl;
+    std::cerr << "Backtrace:" << std::endl;
+    std::cerr << "========================================" << std::endl;
+
+    boost::stacktrace::stacktrace st;
+    for (std::size_t i = 0; i < st.size(); ++i) {
+        const auto& f = st[i];
+        const auto file = f.source_file();
+
+        std::cerr << "#" << i << " " << f.name();
+
+        if (!file.empty()) {
+            std::cerr << " at " << file << ":" << f.source_line();
+        } else {
+            std::cerr << " at " << f.address();
+        }
+        std::cerr << std::endl;
+    }
+
+    std::cerr << "========================================" << std::endl;
+    exit(sig);
+}
 
 // Command line argument parser
 struct Arguments {
@@ -45,6 +73,7 @@ struct Arguments {
     bool single_port_ssd = false;
     bool active_active = false;
     bool verbose = false;
+    uint64_t seed = 0;  // 0 means use random_device
 };
 
 Arguments parse_arguments(int argc, char* argv[]) {
@@ -84,6 +113,7 @@ Arguments parse_arguments(int argc, char* argv[]) {
         else if (arg == "--single_port_ssd") args.single_port_ssd = true;
         else if (arg == "--active_active") args.active_active = true;
         else if (arg == "--verbose") args.verbose = true;
+        else if (arg == "--seed" && i + 1 < argc) args.seed = std::stoull(argv[++i]);
         else {
             std::cerr << "Error: Unknown argument: " << arg << std::endl;
             std::cerr << "Valid options:" << std::endl;
@@ -119,6 +149,7 @@ Arguments parse_arguments(int argc, char* argv[]) {
             std::cerr << "  --single_port_ssd         Single port SSD mode" << std::endl;
             std::cerr << "  --active_active           Active-active mode" << std::endl;
             std::cerr << "  --verbose                 Enable verbose logging" << std::endl;
+            std::cerr << "  --seed <uint64>           Random seed (0 = use random_device)" << std::endl;
             exit(1);
         }
     }
@@ -127,6 +158,10 @@ Arguments parse_arguments(int argc, char* argv[]) {
 }
 
 int main(int argc, char* argv[]) {
+    // Register signal handler for segfault backtrace
+    signal(SIGSEGV, signal_handler);
+    signal(SIGABRT, signal_handler);
+
     Arguments args = parse_arguments(argc, argv);
 
     // Configure logger: quiet by default, verbose with --verbose flag
@@ -260,14 +295,19 @@ int main(int argc, char* argv[]) {
         options["credit_availability_sweep_csv"] = args.credit_availability_sweep_csv;
     }
 
+    // Set random seed
+    options["seed"] = args.seed;
+
     // Run simulation
-    int num_simulations = 80000;
+    int num_simulations = 200000;
     monte_carlo_simulation(params_and_results, hardware_graph, num_simulations, options, costs);
 
     // Output results
     std::cout << "\nSimulation Results:" << std::endl;
     std::cout << "  Availability: " << params_and_results["availability"] << std::endl;
     std::cout << "  Availability (nines): " << params_and_results["avail_nines"] << std::endl;
+    std::cout << "  Credit Availability (nines): " << params_and_results["credit_avail_nines"] << std::endl;
+    std::cout << "  Credit2 Availability (nines): " << params_and_results["credit2_avail_nines"] << std::endl;
 
     // Write to output file if needed
     if (!args.no_result) {

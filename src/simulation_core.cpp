@@ -125,6 +125,7 @@ struct SimulationState {
     double cached_up_time = 0.0;
     double effective_up_time = 0.0;
     double credit_up_time = 0.0;
+    double credit2_up_time = 0.0;
     double timestamp = 0.0;
     double prev_time = 0.0;
 
@@ -144,7 +145,7 @@ struct SimulationState {
     double cached_initial_cost = 0.0;
     double uncached_initial_cost = 0.0;
 
-    std::map<double, double> effective_availabilities;
+    std::map<std::pair<double, double>, double> effective_availabilities;  // (eff_avail, avail_ratio) -> time
     DisconnectedStatus last_disconnected;
 
     double prev_event_time = 0.0;
@@ -162,7 +163,8 @@ SimulationState initialize_simulation_state(
     const std::map<std::string, double>& costs,
     const nlohmann::json& options,
     const EmpiricalCDF* ssd_failure_cdf = nullptr,
-    double ssd_arr = 0.0) {
+    double ssd_arr_qlc = 0.0,
+    double ssd_arr_tlc = 0.0) {
 
     SimulationState state;
 
@@ -188,7 +190,7 @@ SimulationState initialize_simulation_state(
 
     // Generate initial failure events
     state.failed_events = generate_first_failure_events(
-        hardware_graph, node_to_module_map, params.total_ssds, ssd_redun_scheme, ssd_failure_cdf, ssd_arr);
+        hardware_graph, node_to_module_map, params.total_ssds, ssd_redun_scheme, ssd_failure_cdf, ssd_arr_qlc, ssd_arr_tlc);
 
     // Calculate initial cost
     auto [initial_cost, cached_initial_cost, uncached_initial_cost] = get_initial_cost(
@@ -242,7 +244,8 @@ void process_simulation_event(
     const std::map<std::string, double>& costs,
     const SSDIOModuleManager* ssd_io_manager,
     const EmpiricalCDF* ssd_failure_cdf = nullptr,
-    double ssd_arr = 0.0) {
+    double ssd_arr_qlc = 0.0,
+    double ssd_arr_tlc = 0.0) {
 
     std::string event_type = event.event_type;
     std::string event_node = event.event_node;
@@ -327,7 +330,7 @@ void process_simulation_event(
         state.total_cost += module_cost;
 
         push_failed_event(state.failed_events, event_node, event_time, node_to_module_map,
-                         hardware_graph, ssd_redun_scheme, ssd_failure_cdf, ssd_arr);
+                         hardware_graph, ssd_redun_scheme, ssd_failure_cdf, ssd_arr_qlc, ssd_arr_tlc);
     }
 
     // Update repair events for SSDs
@@ -343,6 +346,10 @@ SimulationResult simulation_per_core(
     int batch_size,
     const nlohmann::json& base_options,
     const std::map<std::string, double>& costs) {
+
+    // Seed the random number generator for this thread
+    uint64_t seed = base_options.contains("seed") ? base_options["seed"].get<uint64_t>() : 0;
+    seed_rng(seed, simulation_idx);
 
     // Extract parameters
     SimulationCoreParams params = extract_simulation_params(params_and_results, base_options);
@@ -384,9 +391,14 @@ SimulationResult simulation_per_core(
     }
 
     // Load SSD ARR (Annual Replacement Rate) for spliced distribution
-    double ssd_arr = options.value("ssd_arr", 0.0);
-    if (ssd_failure_cdf_ptr != nullptr && ssd_arr > 0 && simulation_idx == 0) {
-        Logger::getInstance().info("Using spliced distribution with ARR=" + std::to_string(ssd_arr));
+    // Support separate ARR for QLC (uncached) and TLC (cached) SSDs
+    double ssd_arr_qlc = options.value("ssd_arr", options.value("ssd_arr_qlc", 0.0));
+    double ssd_arr_tlc = options.value("ssd_arr_tlc", ssd_arr_qlc);  // Default to QLC ARR if not specified
+    if (ssd_failure_cdf_ptr != nullptr && simulation_idx == 0) {
+        if (ssd_arr_qlc > 0 || ssd_arr_tlc > 0) {
+            Logger::getInstance().info("Using spliced distribution with ARR: QLC=" +
+                std::to_string(ssd_arr_qlc) + ", TLC=" + std::to_string(ssd_arr_tlc));
+        }
     }
 
     // Initialize simulation
@@ -426,7 +438,7 @@ SimulationResult simulation_per_core(
 
     // Initialize state
     SimulationState state = initialize_simulation_state(params, hardware_graph, ssd_redun_scheme,
-                                                        node_to_module_map, costs, options, ssd_failure_cdf_ptr, ssd_arr);
+                                                        node_to_module_map, costs, options, ssd_failure_cdf_ptr, ssd_arr_qlc, ssd_arr_tlc);
 
     // Load network availability
     auto [avail_no_parity, avail_no_parity_cached] = load_network_availability(options, params.network_k);
@@ -484,6 +496,7 @@ SimulationResult simulation_per_core(
         double cached_availability_ratio = flows_and_speed_entry.availability_ratio.cached_availability;
         double effective_availability_ratio = flows_and_speed_entry.eff_availability_ratio;
         double credit_availability_ratio = flows_and_speed_entry.credit_availability_ratio;
+        double credit2_availability_ratio = flows_and_speed_entry.credit2_availability_ratio;
         int up_first_group = flows_and_speed_entry.up_first_group;
 
         // Track MTTDL
@@ -501,8 +514,9 @@ SimulationResult simulation_per_core(
         state.up_time += time_diff * availability_ratio;
         state.cached_up_time += time_diff * cached_availability_ratio;
         state.credit_up_time += time_diff * credit_availability_ratio;
+        state.credit2_up_time += time_diff * credit2_availability_ratio;
         state.timestamp += time_diff;
-        state.effective_availabilities[effective_availability_ratio] += time_diff;
+        state.effective_availabilities[{effective_availability_ratio, availability_ratio * cached_availability_ratio}] += time_diff;
 
         if (break_flag) break;
 
@@ -510,7 +524,7 @@ SimulationResult simulation_per_core(
         process_simulation_event(event, state, params, ssd_redun_scheme, hardware_graph,
                                 node_to_module_map, enclosure_to_node_map, network_availability_table,
                                 max_read_performance_without_any_failure, options, costs,
-                                &ssd_io_manager, ssd_failure_cdf_ptr, ssd_arr);
+                                &ssd_io_manager, ssd_failure_cdf_ptr, ssd_arr_qlc, ssd_arr_tlc);
 
         state.prev_time = event_time;
 
@@ -558,6 +572,7 @@ SimulationResult simulation_per_core(
     result.up_time = state.up_time;
     result.cached_up_time = state.cached_up_time;
     result.credit_up_time = state.credit_up_time;
+    result.credit2_up_time = state.credit2_up_time;
     result.simulation_time = state.timestamp;
     result.effective_up_time = state.effective_up_time;
     result.effective_availabilities = state.effective_availabilities;

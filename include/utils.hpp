@@ -5,6 +5,7 @@
 #include <map>
 #include <cmath>
 #include <random>
+#include <mutex>
 #include <nlohmann/json.hpp>
 
 // Encoding time data structure
@@ -99,5 +100,6 @@ public:
 
 private:
     static std::map<std::pair<int, int>, double> encoding_time_map_;
-    static bool initialized_;
+    static std::once_flag init_flag_;
+    static void do_initialize_encoding_time_data();
 };

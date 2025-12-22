@@ -10,7 +10,7 @@
 #include <sys/stat.h>
 
 std::map<std::pair<int, int>, double> Utils::encoding_time_map_;
-bool Utils::initialized_ = false;
+std::once_flag Utils::init_flag_;
 
 // EmpiricalCDF implementation
 bool EmpiricalCDF::load_from_file(const std::string& file_path) {
@@ -141,8 +141,10 @@ double EmpiricalCDF::get_median() const {
 }
 
 void Utils::initialize_encoding_time_data() {
-    if (initialized_) return;
+    std::call_once(init_flag_, do_initialize_encoding_time_data);
+}
 
+void Utils::do_initialize_encoding_time_data() {
     // k = 1 data
     std::vector<EncodingTimeEntry> data = {
         {2, 1, 65}, {3, 1, 91}, {4, 1, 98}, {5, 1, 115}, {6, 1, 138},
@@ -220,8 +222,6 @@ void Utils::initialize_encoding_time_data() {
     for (const auto& entry : data) {
         encoding_time_map_[{entry.n, entry.k}] = entry.encoding_time;
     }
-
-    initialized_ = true;
 }
 
 double Utils::get_encoding_latency_usec(int m, int k, bool replication) {

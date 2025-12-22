@@ -53,9 +53,10 @@ struct SimulationResult {
     double up_time;
     double cached_up_time;
     double credit_up_time;
+    double credit2_up_time;
     double simulation_time;
     double effective_up_time;
-    std::map<double, double> effective_availabilities;
+    std::map<std::pair<double, double>, double> effective_availabilities;  // (eff_avail, avail_ratio) -> time
     double initial_cost;
     double total_cost;
     double time_for_rebuilding;

@@ -150,7 +150,25 @@ std::string judge_state_from_failure_info(const FailureInfo& failure_info,
 }
 
 // Random number generator (thread-local)
-thread_local std::mt19937 rng(std::random_device{}());
+thread_local std::mt19937 rng;
+thread_local bool rng_initialized = false;
+
+void seed_rng(uint64_t seed, int thread_id) {
+    if (seed == 0) {
+        rng.seed(std::random_device{}());
+    } else {
+        // Combine seed with thread_id for unique per-thread sequences
+        rng.seed(seed + thread_id);
+    }
+    rng_initialized = true;
+}
+
+void ensure_rng_initialized() {
+    if (!rng_initialized) {
+        rng.seed(std::random_device{}());
+        rng_initialized = true;
+    }
+}
 
 // Push failure event to priority queue
 void push_failed_event(std::priority_queue<Event, std::vector<Event>, std::greater<Event>>& failed_events,
@@ -160,16 +178,20 @@ void push_failed_event(std::priority_queue<Event, std::vector<Event>, std::great
                        const GraphStructure& hardware_graph,
                        const SSDRedundancyScheme& ssd_redun_scheme,
                        const EmpiricalCDF* ssd_failure_cdf,
-                       double ssd_arr) {
+                       double ssd_arr_qlc,
+                       double ssd_arr_tlc) {
     double failure_time;
 
     if (is_event_node_ssd(event_node)) {
+        int ssd_index = get_ssd_index(event_node);
+        bool cached = ssd_redun_scheme.is_ssd_index_cached(ssd_index);
+        // Select ARR based on SSD type: TLC (cached) vs QLC (uncached)
+        double ssd_arr = cached ? ssd_arr_tlc : ssd_arr_qlc;
+
         // Use spliced distribution if CDF and ARR are available
         if (ssd_failure_cdf != nullptr && ssd_failure_cdf->is_initialized() && ssd_arr > 0) {
             failure_time = current_time + ssd_failure_cdf->sample_spliced(rng, ssd_arr);
         } else {
-            int ssd_index = get_ssd_index(event_node);
-            bool cached = ssd_redun_scheme.is_ssd_index_cached(ssd_index);
             double mttf = ssd_redun_scheme.get_mttf(cached);
             std::exponential_distribution<double> exp_dist(1.0 / mttf);
             failure_time = current_time + exp_dist(rng);
@@ -283,7 +305,8 @@ std::priority_queue<Event, std::vector<Event>, std::greater<Event>> generate_fir
     int ssd_total_count,
     const SSDRedundancyScheme& ssd_redun_scheme,
     const EmpiricalCDF* ssd_failure_cdf,
-    double ssd_arr) {
+    double ssd_arr_qlc,
+    double ssd_arr_tlc) {
 
     std::priority_queue<Event, std::vector<Event>, std::greater<Event>> events;
 
@@ -295,18 +318,18 @@ std::priority_queue<Event, std::vector<Event>, std::greater<Event>> generate_fir
 
     // Add hardware node events
     for (const auto& node : hardware_graph.nodes_) {
-        push_failed_event(events, node, 0, node_to_module_map, hardware_graph, ssd_redun_scheme, ssd_failure_cdf, ssd_arr);
+        push_failed_event(events, node, 0, node_to_module_map, hardware_graph, ssd_redun_scheme, ssd_failure_cdf, ssd_arr_qlc, ssd_arr_tlc);
     }
 
     // Add enclosure events
     for (const auto& [enclosure, _] : hardware_graph.enclosures_) {
-        push_failed_event(events, enclosure, 0, node_to_module_map, hardware_graph, ssd_redun_scheme, ssd_failure_cdf, ssd_arr);
+        push_failed_event(events, enclosure, 0, node_to_module_map, hardware_graph, ssd_redun_scheme, ssd_failure_cdf, ssd_arr_qlc, ssd_arr_tlc);
     }
 
     // Add SSD events
     for (int ssd_index = 0; ssd_index < ssd_total_count; ++ssd_index) {
         std::string ssd_name = get_ssd_name(ssd_index);
-        push_failed_event(events, ssd_name, 0, node_to_module_map, hardware_graph, ssd_redun_scheme, ssd_failure_cdf, ssd_arr);
+        push_failed_event(events, ssd_name, 0, node_to_module_map, hardware_graph, ssd_redun_scheme, ssd_failure_cdf, ssd_arr_qlc, ssd_arr_tlc);
     }
 
     return events;
@@ -532,12 +555,10 @@ void calculate_flows_and_speed(
                 entry.inter_rebuilding_bw[network_failure_count] = rebuilding_bw;
             }
         }
-        // Data loss
+        // Data loss - restore from external backup
         else if (state == SSD_STATE_DATA_LOSS) {
-            double rebuilding_bw = calculate_bottleneck_speed(network_m, 0,
-                                                             {bottleneck_read_bw_per_ssd, ssd_write_bw},
-                                                             options, false);
-            rebuilding_bw /= 8.0;
+            // Default: 100 MB/s for external backup restore (WAN/cloud/tape)
+            double rebuilding_bw = options.value("backup_rebuild_bw", 100.0 * 1024.0 * 1024.0);
             if (prefix == "cached_") {
                 entry.cached_backup_rebuild_speed = rebuilding_bw;
             } else {
@@ -607,7 +628,7 @@ void calculate_flows_and_speed(
         entry.eff_availability_ratio = 1.0;
     }
 
-    // Calculate credit availability
+    // Calculate credit availability (proportional)
     double credit_avail_ratio = 1.0;
     double operational_utilization = options["target_perf_ratio"];
     if (entry.eff_availability_ratio < operational_utilization) {
@@ -617,6 +638,10 @@ void calculate_flows_and_speed(
 
     double avail_ratio = entry.availability_ratio.availability * entry.availability_ratio.cached_availability;
     entry.credit_availability_ratio = std::min(credit_avail_ratio, avail_ratio);
+
+    // Calculate credit2 availability (binary: 0 if below target, 1 otherwise)
+    double credit2_avail_ratio = (entry.eff_availability_ratio >= operational_utilization) ? 1.0 : 0.0;
+    entry.credit2_availability_ratio = std::min(credit2_avail_ratio, avail_ratio);
 
     flows_and_speed_table[key] = entry;
 }
@@ -1075,9 +1100,10 @@ void monte_carlo_simulation(
     double total_up_time = 0.0;
     double total_cached_up_time = 0.0;
     double total_credit_up_time = 0.0;
+    double total_credit2_up_time = 0.0;
     double total_simulation_time = 0.0;
     double total_effective_up_time = 0.0;
-    std::map<double, double> total_effective_availabilities;
+    std::map<std::pair<double, double>, double> total_effective_availabilities;  // (eff_avail, avail_ratio) -> time
     double total_initial_cost = 0.0;
     double total_cost = 0.0;
     double total_time_for_rebuilding = 0.0;
@@ -1099,11 +1125,12 @@ void monte_carlo_simulation(
         total_up_time += result.up_time;
         total_cached_up_time += result.cached_up_time;
         total_credit_up_time += result.credit_up_time;
+        total_credit2_up_time += result.credit2_up_time;
         total_simulation_time += result.simulation_time;
         total_effective_up_time += result.effective_up_time;
 
-        for (const auto& [avail, time] : result.effective_availabilities) {
-            total_effective_availabilities[avail] += time;
+        for (const auto& [key, time] : result.effective_availabilities) {
+            total_effective_availabilities[key] += time;
         }
 
         total_initial_cost += result.initial_cost;
@@ -1128,6 +1155,7 @@ void monte_carlo_simulation(
     double avg_up_time = total_up_time / nprocs;
     double avg_cached_up_time = total_cached_up_time / nprocs;
     double avg_credit_up_time = total_credit_up_time / nprocs;
+    double avg_credit2_up_time = total_credit2_up_time / nprocs;
     double avg_simulation_time = total_simulation_time / nprocs;
     double avg_effective_up_time = total_effective_up_time / nprocs;
     double avg_initial_cost = total_initial_cost / nprocs;
@@ -1140,13 +1168,18 @@ void monte_carlo_simulation(
     double availability = uncached_availability * cached_availability;
     double effective_availability = avg_effective_up_time / avg_simulation_time;
     double credit_availability = avg_credit_up_time / avg_simulation_time;
+    double credit2_availability = avg_credit2_up_time / avg_simulation_time;
 
     // Calculate MTTDL
     double avg_mttdl = (total_mttdl_count > 0) ? (total_mttdl / total_mttdl_count) : 0.0;
 
-    // Calculate percentiles for effective availability
+    // Calculate percentiles for effective availability (extract eff_avail only)
+    std::map<double, double> eff_avail_only;
+    for (const auto& [key, time] : total_effective_availabilities) {
+        eff_avail_only[key.first] += time;
+    }
     auto [avg_eff_avail, median_eff_avail, p99, p999, p9999] =
-        Utils::get_percentile_value(total_effective_availabilities, false);
+        Utils::get_percentile_value(eff_avail_only, false);
 
     // Store results
     params_and_results["uncached_availability"] = uncached_availability;
@@ -1154,10 +1187,12 @@ void monte_carlo_simulation(
     params_and_results["cached_availability"] = cached_availability;
     params_and_results["effective_availability"] = effective_availability;
     params_and_results["credit_availability"] = credit_availability;
+    params_and_results["credit2_availability"] = credit2_availability;
     params_and_results["avail_nines"] = Utils::get_nines(availability);
     params_and_results["cached_avail_nines"] = Utils::get_nines(cached_availability);
     params_and_results["effective_avail_nines"] = Utils::get_nines(effective_availability);
     params_and_results["credit_avail_nines"] = Utils::get_nines(credit_availability);
+    params_and_results["credit2_avail_nines"] = Utils::get_nines(credit2_availability);
     params_and_results["simulation_time"] = avg_simulation_time;
     params_and_results["up_time"] = avg_up_time;
     params_and_results["cached_up_time"] = avg_cached_up_time;
@@ -1178,11 +1213,19 @@ void monte_carlo_simulation(
     params_and_results["cached_mttf"] = cached_mttf;
     params_and_results["mttdl"] = avg_mttdl;
 
+    double avg_rebuilding_time = 0.0;
+    double avg_rebuild_bw = 0.0;
     if (total_count_for_rebuilding > 0) {
-        params_and_results["avg_rebuilding_time"] = total_time_for_rebuilding / total_count_for_rebuilding;
-    } else {
-        params_and_results["avg_rebuilding_time"] = 0.0;
+        avg_rebuilding_time = total_time_for_rebuilding / total_count_for_rebuilding;
+        // Calculate average rebuild bandwidth in bytes/sec
+        // rebuild_bw = capacity / (rebuilding_time_hours * 3600)
+        double capacity = params_and_results.at("capacity").get<double>();
+        if (avg_rebuilding_time > 0) {
+            avg_rebuild_bw = capacity / (avg_rebuilding_time * 3600.0);
+        }
     }
+    params_and_results["avg_rebuilding_time"] = avg_rebuilding_time;
+    params_and_results["avg_rebuild_bw"] = avg_rebuild_bw;
 
     params_and_results["avg_effective_availability"] = avg_eff_avail;
     params_and_results["median_effective_availability"] = median_eff_avail;
@@ -1284,41 +1327,56 @@ void monte_carlo_simulation(
     // Credit availability sweep: calculate for all targets (0.40~0.99) and output to CSV
     if (options.contains("credit_availability_sweep_csv")) {
         std::string csv_path = options["credit_availability_sweep_csv"].get<std::string>();
-        std::ofstream csv_out(csv_path);
-        if (csv_out.is_open()) {
-            csv_out << "target_perf_ratio,credit_availability,credit_avail_nines\n";
 
-            // Calculate total time from effective_availabilities
-            double total_eff_time = 0.0;
-            for (const auto& [eff_avail, time] : total_effective_availabilities) {
-                total_eff_time += time;
-            }
-
-            // For each target from 0.40 to 0.99 with step 0.01
-            for (int target_pct = 40; target_pct <= 99; target_pct++) {
-                double target = target_pct / 100.0;
-                double credit_up_time_sweep = 0.0;
-
-                for (const auto& [eff_avail, time] : total_effective_availabilities) {
-                    double credit_ratio;
-                    if (eff_avail >= target) {
-                        credit_ratio = 1.0;
-                    } else {
-                        credit_ratio = eff_avail / target;
-                    }
-                    // Also consider data loss (eff_avail = 0 means data loss)
-                    credit_ratio = std::min(credit_ratio, eff_avail > 0 ? 1.0 : 0.0);
-                    credit_up_time_sweep += time * credit_ratio;
-                }
-
-                double credit_avail_sweep = credit_up_time_sweep / total_eff_time;
-                csv_out << std::fixed << std::setprecision(2) << target << ","
-                        << std::setprecision(15) << credit_avail_sweep << ","
-                        << std::setprecision(6) << Utils::get_nines(credit_avail_sweep) << "\n";
-            }
-            csv_out.close();
-            Logger::getInstance().info("Credit availability sweep results written to: " + csv_path);
+        // Calculate total time from effective_availabilities
+        double total_eff_time = 0.0;
+        for (const auto& [key, time] : total_effective_availabilities) {
+            total_eff_time += time;
         }
+
+        // For each target from 0.40 to 0.99 with step 0.01
+        for (int target_pct = 40; target_pct <= 99; target_pct++) {
+            double target = target_pct / 100.0;
+            double credit_up_time_sweep = 0.0;
+            double credit2_up_time_sweep = 0.0;
+
+            for (const auto& [key, time] : total_effective_availabilities) {
+                double eff_avail = key.first;
+                double avail_ratio = key.second;
+
+                // credit (proportional)
+                double credit_ratio;
+                if (eff_avail >= target) {
+                    credit_ratio = 1.0;
+                } else {
+                    credit_ratio = eff_avail / target;
+                }
+                // Also consider availability (data loss / degraded state)
+                credit_ratio = std::min(credit_ratio, avail_ratio);
+                credit_up_time_sweep += time * credit_ratio;
+
+                // credit2 (binary: 0 if below target, 1 otherwise)
+                double credit2_ratio = (eff_avail >= target) ? 1.0 : 0.0;
+                // Also consider availability (data loss / degraded state)
+                credit2_ratio = std::min(credit2_ratio, avail_ratio);
+                credit2_up_time_sweep += time * credit2_ratio;
+            }
+
+            double credit_avail_sweep = credit_up_time_sweep / total_eff_time;
+            double credit2_avail_sweep = credit2_up_time_sweep / total_eff_time;
+
+            // Create a copy of params_and_results with updated target and credit values
+            std::map<std::string, nlohmann::json> sweep_results = params_and_results;
+            sweep_results["target_perf_ratio"] = target;
+            sweep_results["credit_availability"] = credit_avail_sweep;
+            sweep_results["credit_avail_nines"] = Utils::get_nines(credit_avail_sweep);
+            sweep_results["credit2_availability"] = credit2_avail_sweep;
+            sweep_results["credit2_avail_nines"] = Utils::get_nines(credit2_avail_sweep);
+
+            // Write to CSV using the same format as regular results
+            Utils::write_results_to_csv(csv_path, sweep_results);
+        }
+        Logger::getInstance().info("Credit availability sweep results appended to: " + csv_path);
     }
 
     Logger::getInstance().info("Simulation completed");

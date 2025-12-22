@@ -5,8 +5,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Compiler flags
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -O3 -march=native")
+# Compiler flags (include -g for line numbers in backtrace)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -O3 -march=native -rdynamic -g")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0 -fsanitize=address")
 
 # Find required packages
@@ -36,6 +36,9 @@ target_link_libraries(availability_sim
     PRIVATE
         nlohmann_json::nlohmann_json
         Threads::Threads
+        dl
+        boost_stacktrace_backtrace
+        backtrace
 )
 
 # Install target
